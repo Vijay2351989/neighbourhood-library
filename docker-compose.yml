@@ -1,0 +1,116 @@
+# Neighborhood Library — Docker Compose topology.
+#
+# Brings up the four services described in docs/design/05-infrastructure.md:
+#   postgres  — Postgres 16 with the `library` database.
+#   api       — Python 3.12 gRPC server (Phase 1 stub; only health service
+#               registered).
+#   envoy     — gRPC-Web -> native gRPC translator on :8080, admin on :9901.
+#   web       — Next.js dev server on :3000 (frontend agent owns its Dockerfile).
+#
+# Plus an optional one-shot `seed` service guarded by the `seed` profile;
+# activated explicitly with `docker compose --profile seed up`. The seed
+# script (`scripts/seed.py`) lands in Phase 7 — referencing it here is fine
+# because the profile keeps it out of the default `up`.
+#
+# Ports owned by this stack on the host: 5432, 50051, 8080, 9901, 3000.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: library
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: ./backend
+    image: neighborhood-library/api:dev
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/library
+      GRPC_PORT: "50051"
+      DEFAULT_LOAN_DAYS: "14"
+      FINE_GRACE_DAYS: "14"
+      FINE_PER_DAY_CENTS: "25"
+      FINE_CAP_CENTS: "2000"
+    ports:
+      - "50051:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The Phase 1 stub registers the standard grpc.health.v1.Health service,
+      # so this probe succeeds as soon as the gRPC server is bound. Per-service
+      # health entries (LibraryService) are added in Phase 4.
+      test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    ports:
+      - "8080:8080"
+      - "9901:9901"
+    volumes:
+      - ./deploy/envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    depends_on:
+      api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9901/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  web:
+    # The frontend agent owns frontend/Dockerfile and the package.json / Next.js
+    # scaffold inside ./frontend. Contract this service requires from them:
+    #   - `./frontend/Dockerfile` exists and produces an image that listens on :3000
+    #   - the home page is served at `/`
+    #   - NEXT_PUBLIC_API_BASE_URL is consumed at build/runtime as the
+    #     gRPC-Web base URL.
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080"
+    ports:
+      - "3000:3000"
+    depends_on:
+      envoy:
+        condition: service_started
+
+  seed:
+    # One-shot data seeder. Reuses the api image so the gRPC client stubs and
+    # Python deps are already in place. Lives in the `seed` profile so it
+    # does NOT start with a plain `docker compose up`. Activate explicitly:
+    #   docker compose --profile seed up seed
+    # The `scripts/seed.py` file is delivered in Phase 7; until then this
+    # service exits with a missing-file error if invoked, which is intentional.
+    profiles: ["seed"]
+    build:
+      context: ./backend
+    image: neighborhood-library/api:dev
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/library
+      GRPC_TARGET: "api:50051"
+    depends_on:
+      api:
+        condition: service_healthy
+    entrypoint: ["python", "scripts/seed.py"]
+    restart: "no"
+
+volumes:
+  pgdata:

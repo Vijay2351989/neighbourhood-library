@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated protobuf code (regenerated at build time)
+backend/src/library/generated/
+frontend/src/generated/
+
+# Node / Next.js
+node_modules/
+.next/
+dist/
+build/
+
+# Local env files
+.env
+.env.local
+.env.*.local
+
+# Postgres data volume (in case anyone bind-mounts instead of using a named volume)
+pgdata/
+
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.idea/
+.vscode/
+.claude/
