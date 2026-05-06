@@ -63,6 +63,23 @@ COPY src ./src
 COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 COPY entrypoint.sh ./entrypoint.sh
+COPY scripts ./scripts
+
+# Bring in the .proto via the named build context wired up in
+# docker-compose.yml (additional_contexts.proto -> repo-root proto/). Keeping
+# the .proto out of the per-service tree avoids duplication; both backend and
+# frontend builds consume the same source of truth.
+COPY --from=proto . /app/proto
+
+# Generate Python gRPC stubs into src/library/generated/ before the project is
+# installed into the venv — hatchling's wheel build picks up the generated
+# package alongside the rest of src/library/. PATH is prepended so the
+# grpcio-tools `python -m grpc_tools.protoc` invocation in gen_proto.sh
+# resolves to the venv interpreter. PROTO_DIR is overridden because the
+# script's default repo-relative resolution doesn't match the in-container
+# layout (the proto context lands at /app/proto, not <repo>/proto).
+RUN PATH="/app/.venv/bin:${PATH}" PROTO_DIR=/app/proto bash /app/scripts/gen_proto.sh
+
 RUN uv sync --no-dev \
     && chmod +x /app/entrypoint.sh
 

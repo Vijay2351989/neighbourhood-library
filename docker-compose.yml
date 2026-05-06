@@ -35,6 +35,12 @@ services:
   api:
     build:
       context: ./backend
+      additional_contexts:
+        # Proto sits at the repo root so backend and frontend codegen consume
+        # one source of truth. Exposed to the build via a named build context
+        # (Compose v2 / BuildKit feature) so the per-service `context:` stays
+        # focused on its own subtree.
+        proto: ./proto
     image: neighborhood-library/api:dev
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/library
@@ -84,6 +90,8 @@ services:
     #     gRPC-Web base URL.
     build:
       context: ./frontend
+      additional_contexts:
+        proto: ./proto
     environment:
       NEXT_PUBLIC_API_BASE_URL: "http://localhost:8080"
     ports:
@@ -102,6 +110,8 @@ services:
     profiles: ["seed"]
     build:
       context: ./backend
+      additional_contexts:
+        proto: ./proto
     image: neighborhood-library/api:dev
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/library

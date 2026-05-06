@@ -1,0 +1,26 @@
+# Keep the build context tight: exclude local dev artifacts that the image
+# rebuilds from scratch anyway.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Generated proto stubs are produced by scripts/gen_proto.sh during the build,
+# so any locally-regenerated copy on the host should not be sent to the
+# Docker daemon.
+src/library/generated/
+
+# Local env files are never baked into images.
+.env
+.env.local
+.env.*.local
+
+# OS / editor.
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

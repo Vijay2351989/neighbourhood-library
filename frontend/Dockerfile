@@ -17,9 +17,22 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# Bring in the .proto via the named build context wired up in
+# docker-compose.yml (additional_contexts.proto -> repo-root proto/). Path is
+# /app/proto, which matches the relative `../proto` referenced in
+# package.json's gen:proto script after we cd into /app.
+COPY --from=proto . /app/proto
+
 # Then copy the rest of the app. .dockerignore keeps node_modules / .next
-# / local env files out of the build context.
+# / local env files / the generated stubs directory out of the build context.
 COPY . .
+
+# Generate Connect / protobuf-es TypeScript stubs into src/generated/ before
+# `next dev` starts — page code in Phase 6 will import from here. We invoke
+# `buf generate` directly rather than `npm run gen:proto` because the npm
+# script's input path `../proto` is host-relative; inside the container the
+# proto build context lands at /app/proto.
+RUN npx --no-install buf generate /app/proto
 
 EXPOSE 3000
 

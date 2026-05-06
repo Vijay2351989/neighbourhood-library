@@ -1,0 +1,27 @@
+# Connect / protobuf-es codegen config for the frontend.
+#
+# Run via `npm run gen:proto` (which calls `buf generate ../proto`) or directly
+# in the Docker build. Plugins are npm-installed locally (devDependencies in
+# package.json), so `local:` lookup finds them via node_modules/.bin/.
+#
+# Outputs:
+#   src/generated/library/v1/library_pb.ts       (message classes)
+#   src/generated/library/v1/library_connect.ts  (service descriptor consumed
+#                                                 by createPromiseClient)
+#
+# Plugin versions are pinned in package.json and tied to the runtime versions
+# of @bufbuild/protobuf and @connectrpc/connect-web — keep them in sync when
+# bumping.
+
+version: v2
+
+plugins:
+  - local: protoc-gen-es
+    out: src/generated
+    opt:
+      - target=ts
+
+  - local: protoc-gen-connect-es
+    out: src/generated
+    opt:
+      - target=ts

@@ -2,6 +2,10 @@ node_modules
 .next
 dist
 build
+# Generated TS stubs are produced by `npm run gen:proto` during the build,
+# so any locally-regenerated copy on the host should not be sent to the
+# Docker daemon.
+src/generated
 .env
 .env.local
 .env.*.local
