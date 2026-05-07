@@ -1,9 +1,10 @@
 """Entry point for the Neighborhood Library gRPC server.
 
-Phase 1 scope: bring up an ``aio.Server`` bound to ``0.0.0.0:GRPC_PORT`` with
-only the standard gRPC health service registered, so that the ``api`` container's
-``grpc_health_probe`` healthcheck has a real endpoint to call. Business
-servicers are registered in Phase 4 once the proto contract exists.
+Phase 4 scope: register the :class:`LibraryServicer` (the eight book/member
+RPCs) alongside the standard ``grpc.health.v1.Health`` service. The health
+service's per-service entry for ``library.v1.LibraryService`` is set to
+``SERVING`` once the servicer is wired in, satisfying the spec's requirement
+that the api healthcheck pass once the business RPCs are live.
 
 Graceful shutdown: SIGINT / SIGTERM trigger ``server.stop(grace)`` so in-flight
 RPCs get a chance to finish. The health service is flipped to ``NOT_SERVING``
@@ -22,6 +23,9 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection
 
 from library.config import get_settings
+from library.db.engine import AsyncSessionLocal
+from library.generated.library.v1 import library_pb2, library_pb2_grpc
+from library.servicer import LibraryServicer
 
 logger = logging.getLogger("library.main")
 
@@ -29,12 +33,19 @@ logger = logging.getLogger("library.main")
 # health-checking protocol. ``grpc_health_probe`` defaults to this.
 _OVERALL_HEALTH_SERVICE: Final[str] = ""
 
+# Per-service health entry name. Frontend / Envoy can probe this specifically
+# to know whether the business surface is up, distinct from the overall
+# server-up signal above.
+_LIBRARY_SERVICE_NAME: Final[str] = (
+    library_pb2.DESCRIPTOR.services_by_name["LibraryService"].full_name
+)
+
 # Seconds to let in-flight RPCs finish during shutdown before forcing close.
 _SHUTDOWN_GRACE_SECONDS: Final[float] = 5.0
 
 
 def _build_server() -> tuple[aio.Server, health.HealthServicer]:
-    """Construct the asyncio gRPC server with the standard health service attached.
+    """Construct the asyncio gRPC server with health, reflection, and LibraryService.
 
     Returns the server and the health servicer so the caller can flip status
     during shutdown.
@@ -44,15 +55,23 @@ def _build_server() -> tuple[aio.Server, health.HealthServicer]:
     health_servicer = health.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
-    # Mark the overall service as SERVING. Per-service entries will be added in
-    # Phase 4 alongside the LibraryService registration.
+    # Register the business servicer. AsyncSessionLocal is the lazy proxy
+    # built in db/engine.py; the engine isn't actually opened until the first
+    # session is taken, which lets ``alembic upgrade head`` finish first via
+    # entrypoint.sh.
+    library_servicer = LibraryServicer(AsyncSessionLocal)
+    library_pb2_grpc.add_LibraryServiceServicer_to_server(library_servicer, server)
+
+    # Mark both health entries as SERVING.
     health_servicer.set(_OVERALL_HEALTH_SERVICE, health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(_LIBRARY_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
 
     # Server reflection lets tools like grpcurl discover services without a
     # local copy of the .proto. Useful for dev / debugging; cheap to ship.
     reflection.enable_server_reflection(
         (
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
+            _LIBRARY_SERVICE_NAME,
             reflection.SERVICE_NAME,
         ),
         server,
@@ -94,6 +113,10 @@ async def _serve() -> None:
         # Drain: tell health probes we're going away, then stop the server.
         health_servicer.set(
             _OVERALL_HEALTH_SERVICE,
+            health_pb2.HealthCheckResponse.NOT_SERVING,
+        )
+        health_servicer.set(
+            _LIBRARY_SERVICE_NAME,
             health_pb2.HealthCheckResponse.NOT_SERVING,
         )
         await server.stop(_SHUTDOWN_GRACE_SECONDS)

@@ -2,8 +2,8 @@
 
 **Project:** Neighborhood Library
 **Last Updated:** 2026-05-06
-**Overall Status:** Phase 3 Complete — paused at user gate before Phase 4
-**Active Phase:** none (awaiting user approval to start Phase 4)
+**Overall Status:** Phase 4 Complete — paused at user gate before Phase 5
+**Active Phase:** none (awaiting user approval to start Phase 5)
 
 ---
 
@@ -119,13 +119,54 @@ The frontend scaffold landed on Next 16 / Tailwind v4 because `create-next-app@l
 - **`scripts/sample_client.py` / `scripts/seed.py` (Phase 7).** Both will use `library_pb2_grpc.LibraryServiceStub` against `api:50051`. The stub class is already available in the generated module — verified above.
 
 ### Phase 4: Backend CRUD: Books & Members
-**Status:** Not Started — ready (Phase 2 + Phase 3 satisfy dependencies)
-**Dependencies:** Phase 2 ✅, Phase 3 ✅
+**Status:** <promise>DONE</promise>
+**Completed:** 2026-05-06
 **Spec:** [phases/phase-4-backend-crud.md](phases/phase-4-backend-crud.md)
+**Effort:** L (~6 hrs — under spec L estimate; the layering established in Phases 1–3 paid off)
+
+#### Implementation summary
+- **`errors.py`** — `DomainError` base + `NotFound` / `AlreadyExists` / `InvalidArgument` / `FailedPrecondition` typed exceptions, plus `@map_domain_errors` decorator that translates domain exceptions into the matching `grpc.StatusCode` via `context.abort`. `AioRpcError` from `abort` propagates untouched; everything else surfaces as `INTERNAL` with the traceback logged but not returned to the client.
+- **Repositories** (no proto imports, per [docs/design/03-backend.md §3](design/03-backend.md)):
+  - `repositories/books.py` — `create`, `get`, `list_books`, `update_book`. The list query is the `LEFT JOIN book_copies + COUNT FILTER (WHERE status='AVAILABLE')` aggregate from [design/01-database.md §4](design/01-database.md#4-computing-available_copies). LIKE-prefix search on `lower(title)` / `lower(author)` with explicit `\\` escaping of `%` / `_` / `\\` so user input can't inject wildcards. Copy reconciliation (`_reconcile_copies`) only touches `AVAILABLE` rows; rejects with `FailedPrecondition` if the request would require removing borrowed/lost copies. Removal ordered by `id ASC` for deterministic test pinning.
+  - `repositories/members.py` — analogous CRUD + search. `IntegrityError` from the `members_email_unique_idx` is detected via `orig.constraint_name` (with a substring fallback) and translated to `AlreadyExists`.
+  - `updated_at` is application-set with `datetime.now(timezone.utc)` rather than `func.now()`. Setting a SQL expression instead of a Python value forces SQLAlchemy to refresh from the DB on next read, which goes through the asyncpg async bridge — and that triggered a `MissingGreenlet` when the proto-conversion code (sync function) accessed the attribute. Caught and fixed during integration testing; documented inline.
+- **Services** (proto ↔ domain + transactions):
+  - `services/conversions.py` — `clamp_pagination`, `datetime_to_pb`, `normalize_search`. Pagination rules: `offset < 0` and `page_size < 0` raise `InvalidArgument`; `page_size == 0` defaults to 25; `page_size > 100` clamps to 100.
+  - `services/book_service.py` and `services/member_service.py` — one method per RPC, validation, transaction boundary via `async with session_factory.begin() as session`, response message construction. `Member.outstanding_fines_cents` is hardcoded to `0` with a `TODO(phase-5)` — Phase 5 swaps in the real `compute_fine_cents` aggregate.
+- **`servicer.py`** — `LibraryServicer(library_pb2_grpc.LibraryServiceServicer)` overriding the eight book/member methods. Each method is a thin `await self._foo_service.x(request)` wrapped by `@map_domain_errors`. The four loan RPCs are deliberately not overridden so the generated base class returns `UNIMPLEMENTED` for them until Phase 5.
+- **`main.py`** — registers `LibraryServicer(AsyncSessionLocal)` on the server, sets the per-service health entry `library.v1.LibraryService = SERVING`, adds `LibraryService` to the reflection set, drains both health entries on shutdown.
+- **Test infrastructure** (`tests/conftest.py`):
+  - Session-scoped Postgres 16 testcontainer (`testcontainers[postgresql]`).
+  - Sync `_configure_environment` autouse fixture that sets `DATABASE_URL` and resets `library.config._settings` / `library.db.engine._engine` / `library.db.engine._sessionmaker` to None so the lazy singletons rebuild against the test URL.
+  - Sync `_migrated_schema` autouse fixture that runs `alembic upgrade head` programmatically against the testcontainer.
+  - Async `grpc_server` session-scoped fixture starting an in-process `grpc.aio` server on a random port with `LibraryServicer` registered.
+  - `library_channel` + `library_stub` session-scoped fixtures.
+  - Autouse function-scoped `_clean_db` that `TRUNCATE ... RESTART IDENTITY CASCADE` between tests.
+  - `pyproject.toml` pinned `asyncio_default_fixture_loop_scope = "session"` AND `asyncio_default_test_loop_scope = "session"` so the session-scoped server / channel / stubs are usable across tests without "Future attached to a different loop" errors.
+- **Tests** — 39 integration tests across `test_books.py` (23) and `test_members.py` (16). Coverage: all eight RPC happy paths; validation cases (empty title/author, name/email, invalid number_of_copies); NOT_FOUND for missing IDs; case-insensitive duplicate email rejection on both create and update; copy reconciliation up, down, and the down-below-borrowed rejection (set up by directly mutating `book_copies.status` since Phase 5 owns the borrow flow); pagination with default-on-zero and explicit page sizes; case-insensitive prefix search on title/author and name/email; clearing optional wrapper fields on update.
+
+#### Spec deviations & rationale
+- **`UpdateBook` allows `number_of_copies = 0`** while `CreateBook` requires `>= 1`. The phase spec lists `>= 1` for `number_of_copies` on Create only; on Update, an explicit `0` is a valid librarian action ("take this title out of circulation") and the reconciliation safeguard already prevents the dangerous case (borrowed copies still on the books).
+- **Pagination edge cases.** The spec says "page_size <= 0 → use default" and "All return INVALID_ARGUMENT (not silent fix) when the input is malformed; clamp only for 0/missing." We took the consistent reading: `page_size == 0` defaults silently (proto3 default = 0 = "client didn't set"), `page_size < 0` is malformed input → `InvalidArgument`, `page_size > 100` clamps silently. `offset < 0` is malformed → `InvalidArgument`.
+- **Connection lifecycle.** Engine and sessionmaker stay singletons; tests reset them by direct assignment to `None`. Cleaner than threading "test-only" reset helpers into `library.config` and `library.db.engine`, and the privates are documented with the rationale inside `conftest.py`.
+
+#### Verification
+- `pytest backend/tests/integration/` → **39 passed in 5.14s**.
+- `docker compose build api` — image builds with the new servicer.
+- `docker compose up postgres api` — both services reach `healthy` (the api health entry now reports the per-service `library.v1.LibraryService` as SERVING in addition to the overall server entry).
+- Direct gRPC smoke against `localhost:50051` from a Python client using the generated stubs: `ListBooks` empty, `CreateBook` (with isbn+published_year wrappers), `CreateMember`, `ListBooks` populated, `ListMembers` populated, `CreateMember` with case-shifted duplicate email returns `ALREADY_EXISTS` with the expected message.
+- `grpcurl` not available on the host, so the spec's `grpcurl ListBooks` smoke is replaced by the Python-stub equivalent above (same wire format, same path through the servicer).
+- `docker compose up envoy` did not run during this verification because port 8080 is occupied on the host by another process (unrelated to this project). Envoy + frontend integration is exercised in Phase 6; the standard gRPC path through `:50051` is independent of Envoy.
+
+#### Notes for downstream phases
+- **Phase 5 borrow/return flow.** The `loan_service` / `repositories/loans.py` modules will need to update `Member.outstanding_fines_cents` computation in `services/member_service._member_to_proto` (currently `0` with `TODO(phase-5)`). The `compute_fine_cents` pure function lives at `services/fines.py` per the design doc; it will be unit-tested per [reference/testing.md §1](reference/testing.md). The `update_book` repository's `_reconcile_copies` already enforces the "can't drop below borrowed" invariant the borrow flow depends on.
+- **Phase 5 servicer methods.** The four loan methods (`BorrowBook`, `ReturnBook`, `ListLoans`, `GetMemberLoans`) currently fall through to the generated base class's `UNIMPLEMENTED` response. Phase 5 just adds them to `servicer.py` with the same `@map_domain_errors` decorator pattern.
+- **Phase 5 concurrency tests.** The session-loop fixture already supports parallel `asyncio.gather(...)` invocations against the in-process server. The `tests/integration/test_concurrency.py` file from the design doc plugs straight into the existing `library_stub` fixture.
+- **Phase 6 tsconfig bump.** Carries over from Phase 3: the frontend's tsconfig still targets ES2017, which trips on `bigint` literals from `int64` proto fields. Update before the first `lib/client.ts` call.
 
 ### Phase 5: Borrow & Return with Concurrency + Fines
-**Status:** Not Started
-**Dependencies:** Phase 4
+**Status:** Not Started — ready (Phase 4 satisfies dependencies)
+**Dependencies:** Phase 4 ✅
 **Spec:** [phases/phase-5-borrow-return-fines.md](phases/phase-5-borrow-return-fines.md)
 
 ### Phase 6: Frontend MVP
