@@ -49,6 +49,18 @@ services:
       FINE_GRACE_DAYS: "14"
       FINE_PER_DAY_CENTS: "25"
       FINE_CAP_CENTS: "2000"
+      # OpenTelemetry — see docs/design/06-observability.md §8.4 for the full
+      # contract. Defaults match Phase 5.5 (console exporter); Phase 5.5b
+      # ships the SigNoz overlay and overrides via .env.observability so
+      # OTEL_*_EXPORTER flips to "otlp" and the endpoint resolves.
+      OTEL_SERVICE_NAME: "library-api"
+      OTEL_RESOURCE_ATTRIBUTES: "service.namespace=library,deployment.environment=local"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+      OTEL_TRACES_EXPORTER: "${OTEL_TRACES_EXPORTER:-console}"
+      OTEL_LOGS_EXPORTER: "${OTEL_LOGS_EXPORTER:-console}"
+      OTEL_METRICS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
     ports:
       - "50051:50051"
     depends_on:

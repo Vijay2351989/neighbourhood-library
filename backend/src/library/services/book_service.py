@@ -8,9 +8,10 @@ repository layer below it.
 
 from __future__ import annotations
 
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from library.errors import InvalidArgument
+from library.errors import FailedPrecondition, InvalidArgument
 from library.generated.library.v1 import library_pb2
 from library.repositories import books as books_repo
 from library.services.conversions import (
@@ -18,6 +19,8 @@ from library.services.conversions import (
     datetime_to_pb,
     normalize_search,
 )
+
+_tracer = trace.get_tracer("library.services.book_service")
 
 
 class BookService:
@@ -60,6 +63,16 @@ class BookService:
             )
             book_proto = _book_row_to_proto(row)
 
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.add_event(
+                "book.created",
+                attributes={
+                    "library.book_id": row.book.id,
+                    "library.copies_count": row.total_copies,
+                },
+            )
+
         return library_pb2.CreateBookResponse(book=book_proto)
 
     async def update_book(
@@ -88,15 +101,48 @@ class BookService:
                 raise InvalidArgument("number_of_copies must be non-negative")
 
         async with self._session_factory.begin() as session:
-            row = await books_repo.update_book(
-                session,
-                request.id,
-                title=title,
-                author=author,
-                isbn=isbn,
-                published_year=published_year,
-                number_of_copies=number_of_copies,
-            )
+            if number_of_copies is not None:
+                with _tracer.start_as_current_span("books.reconcile_copies") as recon_span:
+                    recon_span.set_attribute("library.book_id", request.id)
+                    recon_span.set_attribute("library.target_copies", number_of_copies)
+                    try:
+                        row = await books_repo.update_book(
+                            session,
+                            request.id,
+                            title=title,
+                            author=author,
+                            isbn=isbn,
+                            published_year=published_year,
+                            number_of_copies=number_of_copies,
+                        )
+                    except FailedPrecondition as exc:
+                        recon_span.add_event(
+                            "copies.reconciliation_rejected",
+                            attributes={
+                                "library.book_id": request.id,
+                                "library.target_copies": number_of_copies,
+                                "library.reason": str(exc),
+                            },
+                        )
+                        raise
+                    recon_span.add_event(
+                        "copies.reconciled",
+                        attributes={
+                            "library.book_id": request.id,
+                            "library.total_copies": row.total_copies,
+                            "library.available_copies": row.available_copies,
+                        },
+                    )
+            else:
+                row = await books_repo.update_book(
+                    session,
+                    request.id,
+                    title=title,
+                    author=author,
+                    isbn=isbn,
+                    published_year=published_year,
+                    number_of_copies=number_of_copies,
+                )
             book_proto = _book_row_to_proto(row)
 
         return library_pb2.UpdateBookResponse(book=book_proto)

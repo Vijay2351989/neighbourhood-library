@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from library.config import Settings
@@ -26,6 +27,8 @@ from library.repositories import loans as loans_repo
 from library.repositories.loans import FineConfig, LoanFilter, LoanRow
 from library.services.conversions import clamp_pagination, datetime_to_pb
 from library.services.fines import compute_fine_cents
+
+_tracer = trace.get_tracer("library.services.loan_service")
 
 
 class LoanService:
@@ -53,27 +56,46 @@ class LoanService:
     async def borrow_book(
         self, request: library_pb2.BorrowBookRequest
     ) -> library_pb2.BorrowBookResponse:
-        if request.book_id <= 0:
-            raise InvalidArgument("book_id is required")
-        if request.member_id <= 0:
-            raise InvalidArgument("member_id is required")
+        with _tracer.start_as_current_span("borrow.validate") as span:
+            span.set_attribute("library.book_id", request.book_id)
+            span.set_attribute("library.member_id", request.member_id)
+            if request.book_id <= 0:
+                raise InvalidArgument("book_id is required")
+            if request.member_id <= 0:
+                raise InvalidArgument("member_id is required")
 
-        now = _now_utc()
-        due_at = (
-            request.due_at.ToDatetime(tzinfo=timezone.utc)
-            if request.HasField("due_at")
-            else now + timedelta(days=self._settings.default_loan_days)
-        )
-        if due_at <= now:
-            raise InvalidArgument("due_at must be in the future")
-
-        async with self._session_factory.begin() as session:
-            row = await loans_repo.borrow(
-                session,
-                book_id=request.book_id,
-                member_id=request.member_id,
-                due_at=due_at,
+            now = _now_utc()
+            due_at = (
+                request.due_at.ToDatetime(tzinfo=timezone.utc)
+                if request.HasField("due_at")
+                else now + timedelta(days=self._settings.default_loan_days)
             )
+            if due_at <= now:
+                raise InvalidArgument("due_at must be in the future")
+
+        with _tracer.start_as_current_span("borrow.transaction") as span:
+            span.set_attribute("library.book_id", request.book_id)
+            span.set_attribute("library.member_id", request.member_id)
+            async with self._session_factory.begin() as session:
+                row = await loans_repo.borrow(
+                    session,
+                    book_id=request.book_id,
+                    member_id=request.member_id,
+                    due_at=due_at,
+                )
+                # Emit the headline business event on the active span. Dashboards
+                # can count `loan.created` instead of grepping logs.
+                span.add_event(
+                    "loan.created",
+                    attributes={
+                        "library.loan_id": row.loan.id,
+                        "library.copy_id": row.loan.copy_id,
+                        "library.book_id": row.book_id,
+                        "library.member_id": row.loan.member_id,
+                    },
+                )
+
+        with _tracer.start_as_current_span("borrow.build_response"):
             loan_proto = self._loan_row_to_proto(row, now=now)
 
         return library_pb2.BorrowBookResponse(loan=loan_proto)
@@ -85,10 +107,36 @@ class LoanService:
             raise InvalidArgument("loan_id is required")
 
         now = _now_utc()
-        async with self._session_factory.begin() as session:
-            row = await loans_repo.return_loan(
-                session, loan_id=request.loan_id, now=now
+        with _tracer.start_as_current_span("return.transaction") as span:
+            span.set_attribute("library.loan_id", request.loan_id)
+            async with self._session_factory.begin() as session:
+                row = await loans_repo.return_loan(
+                    session, loan_id=request.loan_id, now=now
+                )
+            # Snapshot moment — the fine is now frozen because returned_at is
+            # set. Compute the fine here once so the event records the same
+            # value the response carries.
+            fine_cents = compute_fine_cents(
+                due_at=row.loan.due_at,
+                returned_at=row.loan.returned_at,
+                now=now,
+                grace_days=self._fines.grace_days,
+                per_day_cents=self._fines.per_day_cents,
+                cap_cents=self._fines.cap_cents,
             )
+            days_late = max(0, (row.loan.returned_at - row.loan.due_at).days)
+            span.add_event(
+                "loan.returned",
+                attributes={
+                    "library.loan_id": row.loan.id,
+                    "library.fine_cents": fine_cents,
+                    "library.was_overdue": days_late > 0,
+                    "library.days_late": days_late,
+                },
+            )
+
+        with _tracer.start_as_current_span("return.build_response") as span:
+            span.set_attribute("library.fine_cents", fine_cents)
             loan_proto = self._loan_row_to_proto(row, now=now)
 
         return library_pb2.ReturnBookResponse(loan=loan_proto)
@@ -108,16 +156,27 @@ class LoanService:
         filter_value = _proto_to_domain_filter(request.filter)
 
         now = _now_utc()
-        async with self._session_factory() as session:
-            result = await loans_repo.list_loans(
-                session,
-                member_id=member_id,
-                book_id=book_id,
-                filter_value=filter_value,
-                limit=page_size,
-                offset=offset,
-                now=now,
-                fines=self._fines,
+        with _tracer.start_as_current_span("list_loans") as span:
+            span.set_attribute("library.list.page_size", page_size)
+            span.set_attribute("library.list.offset", offset)
+            span.set_attribute("library.list.filter", filter_value.name)
+            async with self._session_factory() as session:
+                result = await loans_repo.list_loans(
+                    session,
+                    member_id=member_id,
+                    book_id=book_id,
+                    filter_value=filter_value,
+                    limit=page_size,
+                    offset=offset,
+                    now=now,
+                    fines=self._fines,
+                )
+            span.add_event(
+                "list.returned",
+                attributes={
+                    "library.list.returned_count": len(result.rows),
+                    "library.list.total_count": result.total_count,
+                },
             )
 
         return library_pb2.ListLoansResponse(
@@ -133,6 +192,11 @@ class LoanService:
         filter_value = _proto_to_domain_filter(request.filter)
 
         now = _now_utc()
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.set_attribute("library.member_id", request.member_id)
+            span.set_attribute("library.list.filter", filter_value.name)
+
         async with self._session_factory() as session:
             rows = await loans_repo.get_member_loans(
                 session,
@@ -140,6 +204,15 @@ class LoanService:
                 filter_value=filter_value,
                 now=now,
                 fines=self._fines,
+            )
+
+        if span is not None and span.is_recording():
+            span.add_event(
+                "member_loans.returned",
+                attributes={
+                    "library.member_id": request.member_id,
+                    "library.count": len(rows),
+                },
             )
 
         return library_pb2.GetMemberLoansResponse(

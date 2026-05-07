@@ -25,6 +25,12 @@ from grpc_reflection.v1alpha import reflection
 from library.config import get_settings
 from library.db.engine import AsyncSessionLocal
 from library.generated.library.v1 import library_pb2, library_pb2_grpc
+from library.observability.interceptors import RequestContextInterceptor
+from library.observability.setup import (
+    TelemetryHandles,
+    grpc_otel_server_interceptor,
+    init_telemetry,
+)
 from library.servicer import LibraryServicer
 
 logger = logging.getLogger("library.main")
@@ -48,10 +54,17 @@ def _build_server() -> tuple[aio.Server, health.HealthServicer]:
     """Construct the asyncio gRPC server with health, reflection, and LibraryService.
 
     Returns the server and the health servicer so the caller can flip status
-    during shutdown.
+    during shutdown. The interceptor order matters: the OTel server
+    interceptor must come first so it creates the root span before our
+    request-context interceptor stamps attributes onto it.
     """
 
-    server = aio.server()
+    server = aio.server(
+        interceptors=[
+            grpc_otel_server_interceptor(),
+            RequestContextInterceptor(),
+        ]
+    )
     health_servicer = health.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
@@ -84,6 +97,11 @@ async def _serve() -> None:
     """Bind, start, and block until a shutdown signal arrives."""
 
     settings = get_settings()
+
+    # Initialize telemetry before constructing the server so the gRPC
+    # auto-instrumentation hooks are active when the server is built.
+    telemetry = init_telemetry()
+
     server, health_servicer = _build_server()
 
     bind_address = f"0.0.0.0:{settings.grpc_port}"
@@ -120,16 +138,20 @@ async def _serve() -> None:
             health_pb2.HealthCheckResponse.NOT_SERVING,
         )
         await server.stop(_SHUTDOWN_GRACE_SECONDS)
+        # Flush any pending OTLP batches (no-op when the console exporter is
+        # active; matters when traces/logs are shipped out-of-process).
+        telemetry.shutdown()
         logger.info("library api: stopped")
 
 
 def main() -> None:
-    """Module entry point — wires logging then runs the asyncio server."""
+    """Module entry point — runs the asyncio server.
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    Logging is configured by :func:`init_telemetry` (called inside ``_serve``)
+    so that the JSON formatter is wired up consistently with the OTel logs
+    pipeline. We don't call ``logging.basicConfig`` here.
+    """
+
     try:
         asyncio.run(_serve())
     except KeyboardInterrupt:

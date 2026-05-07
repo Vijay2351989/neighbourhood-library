@@ -129,19 +129,50 @@ def _migrated_schema(_configure_environment: None, database_urls: dict[str, str]
 # ---- async server + client fixtures ----
 
 
-@pytest_asyncio.fixture(scope="session")
-async def grpc_server(_migrated_schema: None) -> AsyncIterator[tuple[grpc.aio.Server, int]]:
-    """Start an in-process asyncio gRPC server bound to a random localhost port."""
+@pytest.fixture(scope="session", autouse=True)
+def _telemetry_for_tests(_configure_environment: None) -> None:
+    """Set up an OTel TracerProvider for the test session.
 
-    # Imported lazily so the env-var override applies before any module-level
-    # construction happens.
+    We set the trace + log exporters to ``none`` so init doesn't spew JSON
+    to stderr during every test run; the observability tests install an
+    :class:`InMemorySpanExporter` on top to capture spans for assertions.
+    Without a real provider in place, the gRPC auto-instrumentation creates
+    no-op spans and the manual spans in the SUT have nowhere to land.
+    """
+
+    os.environ.setdefault("OTEL_TRACES_EXPORTER", "none")
+    os.environ.setdefault("OTEL_LOGS_EXPORTER", "none")
+    os.environ.setdefault("OTEL_SERVICE_NAME", "library-api-test")
+
+    from library.observability.setup import init_telemetry
+
+    init_telemetry()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def grpc_server(
+    _migrated_schema: None, _telemetry_for_tests: None
+) -> AsyncIterator[tuple[grpc.aio.Server, int]]:
+    """Start an in-process asyncio gRPC server bound to a random localhost port.
+
+    Registers the same interceptor stack as production so trace and request
+    context propagate through tests identically to a live deployment.
+    """
+
     from grpc import aio
 
     from library.db.engine import AsyncSessionLocal
     from library.generated.library.v1 import library_pb2_grpc
+    from library.observability.interceptors import RequestContextInterceptor
+    from library.observability.setup import grpc_otel_server_interceptor
     from library.servicer import LibraryServicer
 
-    server = aio.server()
+    server = aio.server(
+        interceptors=[
+            grpc_otel_server_interceptor(),
+            RequestContextInterceptor(),
+        ]
+    )
     library_pb2_grpc.add_LibraryServiceServicer_to_server(
         LibraryServicer(AsyncSessionLocal), server
     )

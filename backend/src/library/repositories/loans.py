@@ -23,12 +23,15 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final, NamedTuple
 
+from opentelemetry import trace
 from sqlalchemy import Integer, and_, cast, func, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from library.db.models import Book, BookCopy, CopyStatus, Loan, Member
 from library.errors import FailedPrecondition, NotFound
+
+_tracer = trace.get_tracer("library.repositories.loans")
 
 _ACTIVE_LOAN_INDEX: Final[str] = "loans_one_active_per_copy_idx"
 
@@ -146,10 +149,21 @@ async def borrow(
         .limit(1)
         .with_for_update(skip_locked=True)
     )
-    copy = (await session.scalars(pick_stmt)).first()
-    if copy is None:
-        raise FailedPrecondition(
-            f"no available copies for book {book_id}"
+    with _tracer.start_as_current_span("borrow.pick_copy") as pick_span:
+        pick_span.set_attribute("library.book_id", book_id)
+        copy = (await session.scalars(pick_stmt)).first()
+        if copy is None:
+            # Distinct from a NotFound: the book exists, but every copy is
+            # locked or borrowed. Surface as a span event so dashboards can
+            # count contention without grepping logs.
+            pick_span.add_event(
+                "loan.contention", attributes={"library.book_id": book_id}
+            )
+            raise FailedPrecondition(
+                f"no available copies for book {book_id}"
+            )
+        pick_span.add_event(
+            "copy_picked", attributes={"library.copy_id": copy.id}
         )
 
     loan = Loan(copy_id=copy.id, member_id=member_id, due_at=due_at)

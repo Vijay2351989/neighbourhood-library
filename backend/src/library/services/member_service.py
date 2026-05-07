@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from opentelemetry import trace
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from library.config import Settings
@@ -26,6 +27,8 @@ from library.services.conversions import (
     datetime_to_pb,
     normalize_search,
 )
+
+_tracer = trace.get_tracer("library.services.member_service")
 
 
 class MemberService:
@@ -68,6 +71,12 @@ class MemberService:
             # definition — no need to issue the aggregate query.
             member_proto = _member_to_proto(member, outstanding_fines_cents=0)
 
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.add_event(
+                "member.created", attributes={"library.member_id": member.id}
+            )
+
         return library_pb2.CreateMemberResponse(member=member_proto)
 
     async def update_member(
@@ -99,6 +108,12 @@ class MemberService:
             # they need the post-update aggregate.
             member_proto = _member_to_proto(member, outstanding_fines_cents=0)
 
+        span = trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.add_event(
+                "member.updated", attributes={"library.member_id": member.id}
+            )
+
         return library_pb2.UpdateMemberResponse(member=member_proto)
 
     # ---------- reads ----------
@@ -112,14 +127,33 @@ class MemberService:
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             member = await members_repo.get(session, request.id)
-            outstanding = await loans_repo.sum_member_fines(
-                session,
-                member_id=request.id,
-                now=now,
-                fines=self._fines,
-            )
+            with _tracer.start_as_current_span("fines.aggregate") as span:
+                span.set_attribute("library.member_id", request.id)
+                outstanding = await loans_repo.sum_member_fines(
+                    session,
+                    member_id=request.id,
+                    now=now,
+                    fines=self._fines,
+                )
+                span.add_event(
+                    "fines.computed",
+                    attributes={
+                        "library.member_id": request.id,
+                        "library.outstanding_fines_cents": outstanding,
+                    },
+                )
             member_proto = _member_to_proto(
                 member, outstanding_fines_cents=outstanding
+            )
+
+        outer = trace.get_current_span()
+        if outer is not None and outer.is_recording():
+            outer.add_event(
+                "member.fetched",
+                attributes={
+                    "library.member_id": member.id,
+                    "library.has_outstanding_fines": outstanding > 0,
+                },
             )
 
         return library_pb2.GetMemberResponse(member=member_proto)

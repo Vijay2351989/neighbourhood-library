@@ -2,8 +2,8 @@
 
 **Project:** Neighborhood Library
 **Last Updated:** 2026-05-07
-**Overall Status:** Phase 5 Complete — paused at user gate before Phase 6
-**Active Phase:** none (awaiting user approval to start Phase 6)
+**Overall Status:** Phase 5.5 Complete; Phase 5.5b spec drafted — paused at user gate before implementing the SigNoz overlay
+**Active Phase:** none (awaiting user approval to start Phase 5.5b or proceed to Phase 6)
 
 ---
 
@@ -203,6 +203,66 @@ The frontend scaffold landed on Next 16 / Tailwind v4 because `create-next-app@l
 - **Sample client / seed scripts.** `backend/scripts/sample_client.py` (Phase 7) should walk through the full borrow → return → list lifecycle. Phase 5's end-to-end smoke is the seed for that — paste-ready.
 - **Time injection.** Production code currently calls `datetime.now(timezone.utc)` at the top of each service method. Tests work around this by backdating `due_at` / `returned_at` directly in the DB. If Phase 7 ever wants reproducible time-dependent demos, refactor `LoanService` to take a `now_fn` callable; small change, mostly mechanical.
 - **`return_loan` re-fetch.** After flipping the copy and setting `returned_at`, the repo issues a second SELECT-with-joins to rebuild the `LoanRow` for the response. One extra round trip per return; trade for simpler proto-conversion code that doesn't have to know about joins. Acceptable at scale; could fold into a single CTE if it ever shows up in a profile.
+
+### Phase 5.5: Observability Instrumentation
+**Status:** <promise>DONE</promise>
+**Completed:** 2026-05-07
+**Spec:** [phases/phase-5-5-observability.md](phases/phase-5-5-observability.md)
+**Design:** [design/06-observability.md](design/06-observability.md)
+**Effort:** M (~4 hrs — under spec; the layering established in Phases 1–5 paid off)
+
+#### Implementation summary
+- **`library/observability/` package** (3 modules):
+  - `setup.py` — `init_telemetry()` builds `TracerProvider` + `LoggerProvider` from `OTEL_*` env vars, runs `SQLAlchemyInstrumentor` and `AsyncPGInstrumentor` for auto SQL spans, returns shutdown hooks for the drain path.
+  - `interceptors.py` — `RequestContextInterceptor` generates `request.id = uuid4()`, stamps it on the active span and a contextvar, emits one INFO access log per RPC. Detects sync vs async handlers (the standard `HealthServicer` ships sync handlers — initial implementation tripped on `await`).
+  - `logging_config.py` — `JsonFormatter` reading active OTel context + the request-id contextvar, plus a `redact_email` utility. Replaces the prior `logging.basicConfig` plaintext setup.
+- **`main.py`** — calls `init_telemetry()` before `_build_server()`; the gRPC server is constructed with `[grpc_otel_server_interceptor(), RequestContextInterceptor()]` so the OTel root span exists before the request-context interceptor stamps `request.id` onto it. `telemetry.shutdown()` runs in the drain path.
+- **`errors.py`** — `map_domain_errors` now sets `Status(StatusCode.ERROR)` and calls `record_exception(...)` on the active span for both `DomainError` and unhandled-`Exception` paths. Trace UIs render errored spans red and the stack trace shows up as a span event.
+- **Manual spans + events at the 7 hotspots from the design doc**:
+  - `loan_service.borrow_book`: `borrow.validate`, `borrow.transaction`, `borrow.build_response` spans + `loan.created` event with `loan_id`, `copy_id`, `book_id`, `member_id`.
+  - `repositories/loans.py:borrow`: `borrow.pick_copy` span around the FOR UPDATE SKIP LOCKED query + `copy_picked` event on success, `loan.contention` event when no copy can be locked.
+  - `loan_service.return_book`: `return.transaction`, `return.build_response` spans + `loan.returned` event with `fine_cents`, `was_overdue`, `days_late` (the snapshot moment captured for dashboards).
+  - `loan_service.list_loans`: `list_loans` span with filter + page-size attrs, `list.returned` event with counts.
+  - `loan_service.get_member_loans`: `member_loans.returned` event on the auto root span.
+  - `member_service.get_member`: `fines.aggregate` span around `sum_member_fines` + `fines.computed`, `member.fetched` events.
+  - `member_service.create_member` / `update_member`: `member.created` / `member.updated` events.
+  - `book_service.create_book` / `update_book`: `book.created` event; `books.reconcile_copies` span with `copies.reconciled` / `copies.reconciliation_rejected` events.
+- **`docker-compose.yml`** — full standard OTel env-var set added to the api service with Compose interpolation defaults, so Phase 5.5b can flip values via `.env.observability` without editing the YAML.
+- **5 new integration tests** in `tests/integration/test_observability.py`:
+  - InMemorySpanExporter fixture wired into the global tracer provider.
+  - Borrow happy path → all 4 manual spans appear, `loan.created` event emitted exactly once with the right ID attrs.
+  - Borrow no-copies → `loan.contention` event emitted with `library.book_id`.
+  - Return happy path → `loan.returned` event with `fine_cents=0`, `was_overdue=False`, `days_late=0`.
+  - Every RPC root span carries `request.id` (uuid4 hex, 32 chars).
+  - **PII smoke**: borrow flow uses `UNIQUE_MEMBER_NAME`, `unique@example.com`, `UNIQUEBOOKTITLE`, `UNIQUEAUTHOR` and asserts none of those substrings appear in any span attribute or event attribute across the captured trace.
+- **Test conftest** updated to register the same interceptor stack as production and `init_telemetry()` with `OTEL_TRACES_EXPORTER=none` / `OTEL_LOGS_EXPORTER=none` so init runs but doesn't dump JSON to stderr; observability tests install the InMemorySpanExporter on top.
+
+#### Verification
+- `pytest backend/tests/` → **85 passed in 5.32s** (80 prior + 5 new). Test runtime regressed by ~3% — well within the 10% budget from the spec.
+- Container build clean (`docker compose build api`).
+- End-to-end smoke against the live container: create book + create member + borrow + return.
+  - JSON access log lines emitted per RPC with `trace_id`, `span_id`, `request.id`, `rpc.method`, `rpc.status`, `rpc.duration_ms`, `peer` — all populated correctly.
+  - Span tree (visible from console exporter) shows all 4 borrow manual spans, all 2 return manual spans, plus `book.created`, `copy_picked`, `loan.created`, `loan.returned` events with non-PII attrs.
+  - Health-check probes don't spam the access log (filtered out per phase notes).
+
+#### Bugs caught & fixed during implementation
+- **Sync handler in HealthServicer.** The interceptor unconditionally `await inner(...)` failed with `TypeError: object HealthCheckResponse can't be used in 'await' expression`. Fixed with `inspect.isawaitable(result)` check. Documented inline.
+- **`%f` strftime placeholder in JSON timestamp.** `logging.Formatter.formatTime` doesn't support microseconds (uses `time.struct_time`). Fixed by formatting via `datetime.fromtimestamp(record.created, tz=UTC).isoformat(timespec="milliseconds")`.
+
+#### Notes for Phase 5.5b
+- The OTel env vars are already plumbed with Compose `${VAR:-default}` interpolation. The 5.5b overlay only needs to ship the SigNoz services + collector config + the `.env.observability` file that flips `OTEL_TRACES_EXPORTER` / `OTEL_LOGS_EXPORTER` to `otlp` and points `OTEL_EXPORTER_OTLP_ENDPOINT` at the collector. **Zero application code changes** for 5.5b — exactly the layering the design doc promised.
+
+### Phase 5.5b: Observability Backend (SigNoz Local Overlay)
+
+### Phase 5.5b: Observability Backend (SigNoz Local Overlay)
+**Status:** Spec drafted, not yet started
+**Dependencies:** Phase 5.5
+**Spec:** [phases/phase-5-5b-observability-backend.md](phases/phase-5-5b-observability-backend.md)
+**Design:** [design/06-observability.md §8.2](design/06-observability.md)
+**Effort:** S (~1.5–2 hrs)
+
+#### Why this phase exists
+Pairs with Phase 5.5 — once the app is emitting OTel data, this phase plugs in **SigNoz** as a self-hosted backend so traces and logs are viewable in a real UI (`localhost:3301`). Single project, single UI for traces + logs + future metrics; no Loki, no Grafana, no separate Prometheus. SigNoz is gated behind a Compose **profile** (`--profile observability`) so the default `docker compose up` flow stays lean. The application's behavior is identical with or without the profile; only env-var values flip from console exporter to OTLP.
 
 ### Phase 6: Frontend MVP
 **Status:** Not Started

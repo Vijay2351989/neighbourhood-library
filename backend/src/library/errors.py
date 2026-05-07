@@ -21,6 +21,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import grpc
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 logger = logging.getLogger("library.errors")
 
@@ -78,15 +80,28 @@ def map_domain_errors(fn: F) -> F:
         try:
             return await fn(self, request, context)
         except DomainError as exc:
+            # Mark the active span as errored so trace UIs render it red and
+            # the stack trace is queryable. We call `record_exception` on the
+            # domain error specifically because operators want to see "what
+            # rule was violated" without having to grep logs for a request id.
+            span = trace.get_current_span()
+            if span is not None and span.is_recording():
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
+                span.record_exception(exc)
             status = _DOMAIN_TO_GRPC_STATUS.get(type(exc), grpc.StatusCode.UNKNOWN)
             await context.abort(status, str(exc))
         except grpc.aio.AioRpcError:
             # context.abort raises this; let it propagate untouched so the
             # already-set status reaches the client.
             raise
-        except Exception:
+        except Exception as exc:
             # Anything we don't recognize is a bug. Log with traceback and
-            # surface as INTERNAL with a generic message.
+            # surface as INTERNAL with a generic message; mark the span so
+            # the trace shows the failure clearly.
+            span = trace.get_current_span()
+            if span is not None and span.is_recording():
+                span.set_status(Status(StatusCode.ERROR, "internal error"))
+                span.record_exception(exc)
             logger.exception("uncaught error in %s", fn.__qualname__)
             await context.abort(grpc.StatusCode.INTERNAL, "internal error")
 
