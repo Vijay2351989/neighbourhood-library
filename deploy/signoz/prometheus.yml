@@ -1,0 +1,10 @@
+# Minimal Prometheus config required by SigNoz query-service.
+#
+# We don't actually run Prometheus locally — query-service consumes ClickHouse
+# directly for traces and logs. But the binary expects this file to exist at
+# the path passed via -config. A near-empty global block is enough to satisfy
+# its config loader.
+
+global:
+  scrape_interval: 60s
+  evaluation_interval: 60s

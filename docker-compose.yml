@@ -12,7 +12,15 @@
 # script (`scripts/seed.py`) lands in Phase 7 — referencing it here is fine
 # because the profile keeps it out of the default `up`.
 #
-# Ports owned by this stack on the host: 5432, 50051, 8080, 9901, 3000.
+# A second profile, `observability` (Phase 5.5b), brings up a self-hosted
+# SigNoz instance — clickhouse, signoz-otel-collector, query-service, frontend.
+# Activated with:
+#   docker compose --env-file .env.observability --profile observability up
+# UI is at http://localhost:3301 once query-service has finished its
+# first-run schema migration (~30s).
+#
+# Ports owned by this stack on the host: 5432, 50051, 8080, 9901, 3000,
+# plus 3301, 4317, 4318 when the observability profile is active.
 
 services:
   postgres:
@@ -134,5 +142,134 @@ services:
     entrypoint: ["python", "scripts/seed.py"]
     restart: "no"
 
+  # ---------- observability profile (Phase 5.5b) ----------
+  #
+  # SigNoz local backend. Gated behind `profiles: ["observability"]` so
+  # `docker compose up` (no profile) does not start any of these services.
+  # See docs/phases/phase-5-5b-observability-backend.md.
+  #
+  # Versions are pinned: SigNoz's component matrix evolves quickly and a
+  # mismatch between query-service / frontend / collector / migrator manifests
+  # as confusing schema-init failures. Bump as a coordinated set.
+
+  signoz-zookeeper:
+    # Required by ClickHouse for ON CLUSTER DDL the SigNoz schema migrator
+    # issues. Even though we run a single-node ClickHouse, the migrator's
+    # cluster-aware migrations need a coordinator. Apache's official image
+    # is used here (Bitnami's free public images moved off Docker Hub in
+    # late 2025).
+    profiles: ["observability"]
+    image: zookeeper:3.7
+    environment:
+      ZOO_MY_ID: "1"
+      ZOO_SERVERS: "server.1=0.0.0.0:2888:3888;2181"
+      ZOO_4LW_COMMANDS_WHITELIST: "*"
+    volumes:
+      - signoz-zookeeper:/data
+    restart: on-failure
+
+  signoz-clickhouse:
+    profiles: ["observability"]
+    image: clickhouse/clickhouse-server:25.8-alpine
+    volumes:
+      - signoz-clickhouse:/var/lib/clickhouse
+      - ./deploy/signoz/clickhouse-users.xml:/etc/clickhouse-server/users.d/library.xml:ro
+      - ./deploy/signoz/clickhouse-cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+    depends_on:
+      - signoz-zookeeper
+    healthcheck:
+      # Alpine images don't ship wget; use clickhouse-client which is always
+      # present on the server image.
+      test: ["CMD", "clickhouse-client", "--query=SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: on-failure
+
+  signoz-otel-collector-migrator:
+    # One-shot: creates the signoz_traces / signoz_logs / signoz_metrics
+    # schemas in ClickHouse, then exits. Both query-service and the collector
+    # depend on this completing successfully.
+    profiles: ["observability"]
+    image: signoz/signoz-schema-migrator:v0.144.4
+    command:
+      - "sync"
+      - "--dsn=tcp://signoz-clickhouse:9000"
+      - "--up="
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+    restart: on-failure
+
+  signoz-otel-collector:
+    profiles: ["observability"]
+    image: signoz/signoz-otel-collector:v0.144.4
+    # The collector binary fails fast if it can't resolve signoz-clickhouse
+    # at startup — under Docker Desktop on macOS the embedded DNS can take a
+    # few seconds longer than the depends_on healthchecks suggest. Wrap the
+    # entrypoint with a tiny retry-until-resolvable shim so the first DNS
+    # lookup is the one that actually succeeds.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until getent hosts signoz-clickhouse >/dev/null 2>&1; do
+          echo "collector: waiting for signoz-clickhouse DNS..."
+          sleep 2
+        done
+        exec /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+    volumes:
+      - ./deploy/signoz/collector.yaml:/etc/otel-collector-config.yaml:ro
+    environment:
+      LOW_CARDINAL_EXCEPTION_GROUPING: "false"
+    ports:
+      - "4317:4317"   # OTLP gRPC — what the api exports to
+      - "4318:4318"   # OTLP HTTP — for browser-side OTel in Phase 6
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+      signoz-otel-collector-migrator:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  signoz-query-service:
+    profiles: ["observability"]
+    image: signoz/query-service:0.76.2-oss
+    command: ["-config=/root/config/prometheus.yml"]
+    environment:
+      ClickHouseUrl: tcp://signoz-clickhouse:9000
+      STORAGE: clickhouse
+      SIGNOZ_LOCAL_DB_PATH: /var/lib/signoz/signoz.db
+    volumes:
+      - signoz-data:/var/lib/signoz/
+      - ./deploy/signoz/prometheus.yml:/root/config/prometheus.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+      signoz-otel-collector-migrator:
+        condition: service_completed_successfully
+    restart: on-failure
+
+  signoz-frontend:
+    profiles: ["observability"]
+    image: signoz/frontend:0.76.0-0e721dee1
+    environment:
+      FRONTEND_API_ENDPOINT: http://signoz-query-service:8080
+    ports:
+      - "3301:3301"
+    depends_on:
+      signoz-query-service:
+        condition: service_healthy
+    restart: on-failure
+
 volumes:
   pgdata:
+  signoz-clickhouse:
+  signoz-data:
+  signoz-zookeeper:

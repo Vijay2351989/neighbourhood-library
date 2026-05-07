@@ -1,0 +1,59 @@
+# SigNoz OTel Collector configuration.
+#
+# This is the SigNoz-flavored OTel collector — it ships SigNoz-specific
+# exporters (`clickhousetraces`, `clickhouselogsexporter`) that write directly
+# to the ClickHouse schemas the query-service queries. Standard OTel
+# collector config grammar otherwise.
+#
+# Phase 5.5b ingests traces + logs only; metrics are deferred.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    # Flush every 10s or 1000 spans, whichever comes first. Keeps memory
+    # bounded on the api side without making the UI feel laggy on dev traffic.
+    send_batch_size: 1000
+    send_batch_max_size: 5000
+    timeout: 10s
+  memory_limiter:
+    # Hard ceiling so the collector can't OOM the ClickHouse box on a burst.
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  resource:
+    # Stamp every record with the platform attribute so traces from this
+    # local stack are easy to distinguish from any future cloud collector.
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+exporters:
+  clickhousetraces:
+    datasource: tcp://signoz-clickhouse:9000/?database=signoz_traces
+    low_cardinal_exception_grouping: ${env:LOW_CARDINAL_EXCEPTION_GROUPING}
+  clickhouselogsexporter:
+    dsn: tcp://signoz-clickhouse:9000/
+    timeout: 10s
+    use_new_schema: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [clickhousetraces]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [clickhouselogsexporter]
+  telemetry:
+    logs:
+      level: info
