@@ -1,9 +1,9 @@
 # Implementation Progress Report
 
 **Project:** Neighborhood Library
-**Last Updated:** 2026-05-06
-**Overall Status:** Phase 4 Complete — paused at user gate before Phase 5
-**Active Phase:** none (awaiting user approval to start Phase 5)
+**Last Updated:** 2026-05-07
+**Overall Status:** Phase 5 Complete — paused at user gate before Phase 6
+**Active Phase:** none (awaiting user approval to start Phase 6)
 
 ---
 
@@ -168,6 +168,41 @@ The frontend scaffold landed on Next 16 / Tailwind v4 because `create-next-app@l
 **Status:** Not Started — ready (Phase 4 satisfies dependencies)
 **Dependencies:** Phase 4 ✅
 **Spec:** [phases/phase-5-borrow-return-fines.md](phases/phase-5-borrow-return-fines.md)
+
+### Phase 5: Borrow & Return with Concurrency + Fines
+**Status:** <promise>DONE</promise>
+**Completed:** 2026-05-07
+**Spec:** [phases/phase-5-borrow-return-fines.md](phases/phase-5-borrow-return-fines.md)
+**Effort:** L (~5 hrs — well under spec L estimate; the layering and test harness from Phases 3–4 paid off heavily)
+
+#### Implementation summary
+- **`services/fines.py`** — pure `compute_fine_cents(due_at, returned_at, now, grace_days, per_day_cents, cap_cents) -> int`. Reference time is `returned_at` when the loan is returned (snapshot) else `now` (still accruing). Days computed via `timedelta.days` (integer floor). 17 unit tests cover every row of the policy table from [design/01-database.md §5](design/01-database.md): within grace, exactly at boundary, mid-fine, at cap, beyond cap, returned within grace, returned past grace (snapshot, snapshot above cap), returned-before-due (zero), parametrized progression sweep.
+- **`repositories/loans.py`** — owns the borrow concurrency strategy and the SQL form of the fine formula:
+  - `borrow(...)` — checks member + book existence (clean `NotFound`), then `SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1` an `AVAILABLE` copy, INSERT the loan, flip the copy to `BORROWED`. Catches `IntegrityError` against `loans_one_active_per_copy_idx` and translates to `FailedPrecondition` as a backstop the partial-unique-index enforces structurally.
+  - `return_loan(...)` — `SELECT ... FOR UPDATE` the loan row, reject with `FailedPrecondition` if already returned, set `returned_at = now`, flip the copy back to `AVAILABLE`.
+  - `_fine_expression(now, fines)` — SQLAlchemy expression mirroring the Python formula: `LEAST(cap, GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (COALESCE(returned_at, :now) - due_at)) / 86400)::int - grace) * per_day)`. Used by the `LOAN_FILTER_HAS_FINE` predicate and by `sum_member_fines`. Python and SQL forms must agree; tests exercise both.
+  - `list_loans(...)` — JOIN to `book_copies`, `books`, `members` for the denormalized fields the proto expects; supports member/book filters and the five `LoanFilter` variants. Ordered most-recent-first with `(borrowed_at DESC, id DESC)` for stable pagination.
+  - `get_member_loans(...)` — same shape but no pagination per spec (a single member's loan history is bounded).
+  - `sum_member_fines(...)` — single-aggregate `SUM(LEAST(...))` over the member's loans (rather than fetching loans and summing in Python).
+  - Domain `LoanFilter` IntEnum mirrors the proto enum integers exactly so service code can map `request.filter` → repo enum trivially while keeping the repo proto-free.
+- **`services/loan_service.py`** — borrow/return/list/get_member_loans methods. `due_at` defaults to `now + DEFAULT_LOAN_DAYS` when the client doesn't set the wrapper; explicit past-due dates are rejected with `InvalidArgument`. The proto's `Loan.overdue` and `Loan.fine_cents` are computed in Python on every response build via `compute_fine_cents`, so the formula has a single source of truth and is fully unit-testable.
+- **`services/member_service.py`** updated — `_member_to_proto` now takes `outstanding_fines_cents` as a keyword argument. `GetMember` calls `loans_repo.sum_member_fines` and passes the real value; `Create` / `Update` / `List` pass 0 (Create has no loans by definition; Update is a write op; ListMembers paying N+1 queries on every page isn't justified for the dashboard's purposes per [design/04-frontend.md](design/04-frontend.md), which only needs system-wide fines, not per-row).
+- **`servicer.py`** — registers all four loan RPCs with the same `@map_domain_errors` pattern. Constructor now also takes a `Settings` (defaulting to `get_settings()`) which it threads through to `LoanService` and `MemberService` for the fine config.
+
+#### Verification
+- **17 unit tests** — `pytest backend/tests/unit/`. Covers every row of the design-doc fine policy table.
+- **63 integration tests** — `pytest backend/tests/integration/`:
+  - 39 from Phase 4 (books + members) still green after the `member_service` refactor for `outstanding_fines_cents`.
+  - 22 in `test_borrow_return.py`: borrow happy path, explicit + default `due_at`, past-`due_at` rejection, no-copies rejection, NOT_FOUND on book or member, return happy path (with available-copies state-transition assertion), return-already-returned rejection, return-not-found, invalid-arg, overdue flag (1 day overdue, no fine yet — within grace), one-day-past-grace fine, at-cap fine, returned-late snapshot fine + overdue=false invariant, multi-loan `outstanding_fines_cents` aggregate, member-with-no-loans returns 0 fines, all five `LoanFilter` variants surfacing the right loans, `member_id` and `book_id` scoping, `GetMemberLoans` ordering and filter and member-not-found.
+  - 2 in `test_concurrency.py`: 10 racers vs 1-copy book → exactly 1 winner, 9 `FAILED_PRECONDITION`, 0 unexpected errors, final DB state has 1 active loan + 1 BORROWED copy + 0 AVAILABLE copies. Same 10 racers vs 2-copy book → exactly 2 winners on distinct copies (proves `SKIP LOCKED` lets concurrent borrows of *different* copies parallelize).
+- **End-to-end smoke** against the live `docker compose up postgres api` stack via the generated Python stubs: create book → create member → borrow (denormalized title/member-name populated, `fine_cents=0`, `overdue=false`) → list active (count 1) → second borrow rejected with `FAILED_PRECONDITION` → return (`returned_at` set, fine 0) → list active (count 0). All checks observed.
+- Total runtime: 80 tests in **6.96s** (one shared testcontainer + in-process server).
+
+#### Notes for Phase 6 / 7
+- **Frontend dashboard tile.** `/` shows total outstanding fines per [design/04-frontend.md §4](design/04-frontend.md). The cheapest implementation is a small server-side helper (a new repo function or a single SQL query summing `_fine_expression` across all loans) that Phase 6 can call once on dashboard load. Out of scope for Phase 5; flag as a small Phase 6 task.
+- **Sample client / seed scripts.** `backend/scripts/sample_client.py` (Phase 7) should walk through the full borrow → return → list lifecycle. Phase 5's end-to-end smoke is the seed for that — paste-ready.
+- **Time injection.** Production code currently calls `datetime.now(timezone.utc)` at the top of each service method. Tests work around this by backdating `due_at` / `returned_at` directly in the DB. If Phase 7 ever wants reproducible time-dependent demos, refactor `LoanService` to take a `now_fn` callable; small change, mostly mechanical.
+- **`return_loan` re-fetch.** After flipping the copy and setting `returned_at`, the repo issues a second SELECT-with-joins to rebuild the `LoanRow` for the response. One extra round trip per return; trade for simpler proto-conversion code that doesn't have to know about joins. Acceptable at scale; could fold into a single CTE if it ever shows up in a profile.
 
 ### Phase 6: Frontend MVP
 **Status:** Not Started

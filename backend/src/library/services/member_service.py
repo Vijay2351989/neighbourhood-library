@@ -1,19 +1,26 @@
 """Member-domain service.
 
-Mirrors :mod:`library.services.book_service` for the four member RPCs. The
-``outstanding_fines_cents`` field on the ``Member`` proto is hardcoded to 0
-here; Phase 5 swaps this for a real aggregate over the member's loans once
-the fine formula and loan repository land.
+Mirrors :mod:`library.services.book_service` for the four member RPCs.
+``outstanding_fines_cents`` is computed via the loans repository's
+``sum_member_fines`` aggregate on the ``GetMember`` path (per phase-5 spec).
+The other paths (Create / Update / List) leave it at zero — Create has no
+loans by definition, and ListMembers paying N+1 queries for fines on every
+row in a paginated table isn't worth it for the dashboard's purposes.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from library.config import Settings
 from library.db.models import Member
 from library.errors import InvalidArgument
 from library.generated.library.v1 import library_pb2
+from library.repositories import loans as loans_repo
 from library.repositories import members as members_repo
+from library.repositories.loans import FineConfig
 from library.services.conversions import (
     clamp_pagination,
     datetime_to_pb,
@@ -22,8 +29,17 @@ from library.services.conversions import (
 
 
 class MemberService:
-    def __init__(self, session_factory: async_sessionmaker) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker,
+        settings: Settings,
+    ) -> None:
         self._session_factory = session_factory
+        self._fines = FineConfig(
+            grace_days=settings.fine_grace_days,
+            per_day_cents=settings.fine_per_day_cents,
+            cap_cents=settings.fine_cap_cents,
+        )
 
     # ---------- mutations ----------
 
@@ -48,7 +64,9 @@ class MemberService:
                 phone=phone,
                 address=address,
             )
-            member_proto = _member_to_proto(member)
+            # A freshly created member has no loans, so fines are 0 by
+            # definition — no need to issue the aggregate query.
+            member_proto = _member_to_proto(member, outstanding_fines_cents=0)
 
         return library_pb2.CreateMemberResponse(member=member_proto)
 
@@ -76,7 +94,10 @@ class MemberService:
                 phone=phone,
                 address=address,
             )
-            member_proto = _member_to_proto(member)
+            # Phase-5 spec only requires the real fines value on GetMember.
+            # Update is a write op; clients can refresh via GetMember if
+            # they need the post-update aggregate.
+            member_proto = _member_to_proto(member, outstanding_fines_cents=0)
 
         return library_pb2.UpdateMemberResponse(member=member_proto)
 
@@ -88,9 +109,18 @@ class MemberService:
         if request.id <= 0:
             raise InvalidArgument("id is required")
 
+        now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             member = await members_repo.get(session, request.id)
-            member_proto = _member_to_proto(member)
+            outstanding = await loans_repo.sum_member_fines(
+                session,
+                member_id=request.id,
+                now=now,
+                fines=self._fines,
+            )
+            member_proto = _member_to_proto(
+                member, outstanding_fines_cents=outstanding
+            )
 
         return library_pb2.GetMemberResponse(member=member_proto)
 
@@ -113,20 +143,22 @@ class MemberService:
                 offset=offset,
             )
 
+        # ListMembers leaves outstanding_fines_cents at zero — paying the
+        # per-row aggregate query for every result page would multiply the
+        # query count and the dashboard's "total outstanding fines" tile
+        # is system-wide rather than per-row anyway.
         return library_pb2.ListMembersResponse(
-            members=[_member_to_proto(m) for m in result.rows],
+            members=[_member_to_proto(m, outstanding_fines_cents=0) for m in result.rows],
             total_count=result.total_count,
         )
 
 
-def _member_to_proto(member: Member) -> library_pb2.Member:
+def _member_to_proto(member: Member, *, outstanding_fines_cents: int) -> library_pb2.Member:
     proto = library_pb2.Member(
         id=member.id,
         name=member.name,
         email=member.email,
-        # TODO(phase-5): replace with sum of compute_fine_cents over the
-        # member's loans once the loan repository and fine formula exist.
-        outstanding_fines_cents=0,
+        outstanding_fines_cents=outstanding_fines_cents,
     )
     if member.phone is not None:
         proto.phone.value = member.phone
