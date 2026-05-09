@@ -2,7 +2,7 @@
 name = "library"
 version = "0.1.0"
 description = "Neighborhood Library — gRPC backend"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<4"
 readme = "README.md"
 
 # Runtime dependency set. Phase 1 added the gRPC stack and config plumbing;

@@ -2,15 +2,15 @@
 #
 # Brings up the four services described in docs/design/05-infrastructure.md:
 #   postgres  — Postgres 16 with the `library` database.
-#   api       — Python 3.12 gRPC server (Phase 1 stub; only health service
-#               registered).
+#   api       — Python 3.12 gRPC server: 12 LibraryService RPCs plus the
+#               standard health and reflection services.
 #   envoy     — gRPC-Web -> native gRPC translator on :8080, admin on :9901.
 #   web       — Next.js dev server on :3000 (frontend agent owns its Dockerfile).
 #
-# Plus an optional one-shot `seed` service guarded by the `seed` profile;
-# activated explicitly with `docker compose --profile seed up`. The seed
-# script (`scripts/seed.py`) lands in Phase 7 — referencing it here is fine
-# because the profile keeps it out of the default `up`.
+# Demo data is opt-in via the `DEMO_MODE` environment variable, not a
+# Compose profile: `DEMO_MODE=true docker compose up` truncates and
+# reseeds the database on api startup. See backend/entrypoint.sh and
+# backend/scripts/reset_and_seed.py.
 #
 # A second profile, `observability` (Phase 5.5b), brings up a self-hosted
 # SigNoz instance — clickhouse, signoz-otel-collector, query-service, frontend.
@@ -80,6 +80,12 @@ services:
       DB_POOL_TIMEOUT_S: "${DB_POOL_TIMEOUT_S:-5}"
       DB_POOL_RECYCLE_S: "${DB_POOL_RECYCLE_S:-1800}"
       DB_COMMAND_TIMEOUT_S: "${DB_COMMAND_TIMEOUT_S:-5}"
+      # Phase 7 — DEMO_MODE. When "true", entrypoint.sh truncates all tables
+      # and reseeds them from backend/scripts/reset_and_seed.py before the
+      # gRPC server starts. Default is "false" so a vanilla `docker compose
+      # up` brings up an empty production-style stack. Activate the demo
+      # fixture with: `DEMO_MODE=true docker compose up`.
+      DEMO_MODE: "${DEMO_MODE:-false}"
     ports:
       - "50051:50051"
     depends_on:
@@ -106,7 +112,14 @@ services:
       api:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:9901/ready || exit 1"]
+      # The official envoyproxy/envoy:* images don't ship wget, curl, or nc —
+      # only bash and sh. We use bash's built-in /dev/tcp pseudo-device to
+      # probe the admin port. If envoy is binding :9901 the connect succeeds
+      # and bash exits 0; if envoy isn't listening it errors out non-zero.
+      # This is a TCP-level liveness check rather than an HTTP /ready probe,
+      # which is sufficient as a startup gate — envoy doesn't bind admin
+      # until config is parsed and the static clusters are initialized.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9901"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -130,28 +143,6 @@ services:
     depends_on:
       envoy:
         condition: service_started
-
-  seed:
-    # One-shot data seeder. Reuses the api image so the gRPC client stubs and
-    # Python deps are already in place. Lives in the `seed` profile so it
-    # does NOT start with a plain `docker compose up`. Activate explicitly:
-    #   docker compose --profile seed up seed
-    # The `scripts/seed.py` file is delivered in Phase 7; until then this
-    # service exits with a missing-file error if invoked, which is intentional.
-    profiles: ["seed"]
-    build:
-      context: ./backend
-      additional_contexts:
-        proto: ./proto
-    image: neighborhood-library/api:dev
-    environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/library
-      GRPC_TARGET: "api:50051"
-    depends_on:
-      api:
-        condition: service_healthy
-    entrypoint: ["python", "scripts/seed.py"]
-    restart: "no"
 
   # ---------- observability profile (Phase 5.5b) ----------
   #

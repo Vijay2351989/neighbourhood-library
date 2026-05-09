@@ -20,8 +20,10 @@ plugins:
     out: src/generated
     opt:
       - target=ts
+      - import_extension=none
 
   - local: protoc-gen-connect-es
     out: src/generated
     opt:
       - target=ts
+      - import_extension=none

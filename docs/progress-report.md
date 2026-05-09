@@ -2,8 +2,95 @@
 
 **Project:** Neighborhood Library
 **Last Updated:** 2026-05-09
-**Overall Status:** Phase 5.5 + 5.5b + 5.6 Complete — paused at user gate before Phase 6
-**Active Phase:** none (awaiting user approval to start Phase 6)
+**Overall Status:** 🎉 ALL PHASES COMPLETE — deliverable is reviewer-ready
+**Active Phase:** none
+
+---
+
+## 🎉 Project Complete
+
+All 7 phases approved by CTO with `<promise>DONE</promise>`. The deliverable is ready to hand to a reviewer.
+
+### What ships
+
+- **Backend** — Python 3.12 + grpcio + SQLAlchemy 2.0 async + Alembic + Pydantic Settings, all 12 RPCs implemented with retry/timeout/observability, integration tests (~130) against real Postgres via testcontainers
+- **Frontend** — Next 16 + React 19 + TypeScript + Tailwind v4 + TanStack Query + Connect-Web, all 12 routes wired through to the backend, full staff workflows (book CRUD, member CRUD, borrow, return, fines visibility), Playwright happy-path e2e
+- **Infrastructure** — Postgres 16 + Envoy gRPC-Web translator + Docker Compose orchestration with `DEMO_MODE` seed switch
+- **Documentation** — comprehensive root README per the rubric outline; modular `docs/` tree with overview, design docs, phase docs, decisions register, manual-test runbook, and progress history; LICENSE; well-commented sample client
+
+### Single bring-up command
+
+```bash
+git clone … && cd neighborhood-library
+DEMO_MODE=true docker compose up    # demo with seeded data
+# OR
+docker compose up                    # production-style empty stack
+```
+
+### Latest completed phase
+
+### Phase 7: Polish — DEMO_MODE seed, sample client, Playwright, root README, cleanups
+**Status:** <promise>DONE</promise>
+**Completed:** 2026-05-09
+**Agents:** elite-engineer, ui-ux-fullstack-savant, cto-code-reviewer
+**Spec:** [phases/phase-7-polish.md](phases/phase-7-polish.md)
+**Effort:** M (~6 hrs)
+
+#### Implementation summary
+- **`DEMO_MODE` seed wiring** — superseded the original Compose `seed` profile. `DEMO_MODE=true` triggers `TRUNCATE` + reseed on every container start; `DEMO_MODE=false` (default) leaves the DB untouched. Idempotent by construction (TRUNCATE-then-insert, not UPSERT).
+- **`backend/scripts/reset_and_seed.py`** — direct ORM writes; produces 21 books, 10 members, 11 loans across all five lifecycle states. Three fine scenarios verified by CTO math: loan 9 (overdue within grace, $0), loan 10 (overdue past grace, $4.00 = 16d × $0.25), loan 11 (returned-late snapshot, $4.00).
+- **`backend/scripts/sample_client.py`** — heavily-commented native gRPC client demonstrating the six-step CreateMember → CreateBook → BorrowBook → ListLoans → ReturnBook → ListLoans cycle. Reads as a tutorial.
+- **Root `README.md`** — all 13 sections from `docs/reference/readme-outline.md`. Architecture diagram, env-var table, quick start, troubleshooting, project layout. Every command verified as runnable.
+- **Playwright happy-path test** — single `frontend/e2e/happy-path.spec.ts` covering all 8 demo steps. Chromium-only, no auto-server, retries=1, trace-on-first-retry. Role-based locators throughout — survives UI tweaks.
+- **Cleanups:** MIT `LICENSE` (2026), `pyproject.toml` Python upper bound `<3.13` → `<4`, `frontend/README.md` and `backend/README.md` minimized to one paragraph each linking to root. `frontend/.gitignore` covers Playwright artifacts.
+
+#### CTO review
+"PASS WITH DISTINCTION." Every acceptance criterion passes. Three fine-state seed math verified by hand. Idempotent seed verified. Container start-up sequencing robust (`set -e` + `sys.exit(1)` aborts on seed failure). Playwright locators verified against actual DOM roles. README is "rubric-load-bearing and the implementer treated it that way."
+
+**CTO Certification:** "I solemnly swear this phase is complete, meets all acceptance criteria, and is production-ready. With Phase 7 complete, the deliverable is reviewer-ready."
+
+#### Single low-priority follow-up (non-blocking)
+- **M1 explicit TODO** — dashboard "Outstanding fines" tile sums client-side at `pageSize=100`. Seed produces only 2 fined loans (well under the cap), so the workaround is correct in practice. A one-line `// TODO(post-mvp): server-side SumFines RPC` comment on `frontend/src/app/page.tsx:48` would make the deferral explicit. Optional polish; not blocking the deliverable.
+
+---
+
+## Phase Status Summary (full history follows)
+
+---
+
+## Latest completed phase
+
+### Phase 6: Frontend MVP
+**Status:** <promise>DONE</promise>
+**Completed:** 2026-05-09
+**Agents:** ui-ux-fullstack-savant, cto-code-reviewer
+**Spec:** [phases/phase-6-frontend-mvp.md](phases/phase-6-frontend-mvp.md)
+**Effort:** L (~14 hrs)
+
+#### Implementation summary
+- **Setup:** `lib/client.ts` (Connect singleton), `lib/queryKeys.ts` (typed factory), `lib/format.ts` (currency + date), `lib/errors.ts` (friendly mapping + `INVALID_ARGUMENT` field parser). Added `@tanstack/react-query` 5.100.9 (React 19 compatible).
+- **UI kit:** Button, Input/Textarea/Select with FieldShell, Card, Skeleton, Table, Pagination, Toast, Dialog, Tabs/ChipFilter — all keyboard-accessible (`role="tablist"`, `aria-invalid`, Escape-trap on Dialog, etc.).
+- **Layout:** `Providers.tsx` (client component wrapping QueryClientProvider + ToastProvider), `TopNav.tsx`, server-rendered `layout.tsx`.
+- **Pages (12 total):** Dashboard with five tiles + recent-activity feed; Books CRUD (list/new/[id]/[id]/edit); Members CRUD with outstanding-fines tile + tabbed loan history; Loans list with chip filters (All/Active/Overdue/Has Fine/Returned); `/loans/new` borrow flow with EntityPicker + BorrowDialog confirmation.
+- **Error UX:** `FAILED_PRECONDITION` routed inline (BorrowDialog, ReturnButton, BookEdit copies field), `INVALID_ARGUMENT` → field-level highlight, `NOT_FOUND` → empty state, everything else → toast.
+- **Next 16 patterns:** async `params`/`searchParams` correctly destructured via `await`; list pages split into thin server `page.tsx` + client sibling wrapped in `<Suspense>`.
+- **Tailwind v4:** no `tailwind.config.ts`; `globals.css` uses `@import "tailwindcss";` + `@theme {}` block; PostCSS plugin via `postcss.config.mjs`.
+- **bigint correctness:** TS target bumped to ES2020 + es2020 lib so int64 IDs propagate cleanly through forms and URL params.
+
+#### CTO review
+"PASS WITH DISTINCTION." All 9 demo steps pass, all 11 constraint checks pass (auth absent, Next 16 patterns, Tailwind v4, Connect singleton, etc.). Two medium-priority items deferred to Phase 7 polish (dashboard fines client-side sum capped at 100; stale frontend README).
+
+**CTO Certification:** "I solemnly swear this phase is complete, meets all acceptance criteria, and is production-ready."
+
+#### Notes for Phase 7
+- M1: dashboard "Outstanding fines" tile sums client-side with pageSize=100 cap. Acceptable for take-home demo but flag for future server-side aggregate RPC.
+- M2: `frontend/README.md` still describes Phase 1 scaffold-only state — update to current.
+- Optional Playwright happy-path test (per Phase 7 spec, time-permitting).
+- Error-UX patterns established here (`toFriendlyError` + per-code routing) are worth lifting into a project convention doc.
+
+---
+
+## Phase Status Summary (full history follows)
 
 ---
 

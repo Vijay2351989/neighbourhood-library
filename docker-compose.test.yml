@@ -1,0 +1,50 @@
+# Override file for an isolated test stack that runs alongside (or in
+# place of) the dev stack without touching its data.
+#
+# Activated by ./test.sh which composes it with the base file under a
+# distinct project name:
+#
+#   docker compose -p library-test \
+#     -f docker-compose.yml -f docker-compose.test.yml \
+#     up -d --build
+#
+# The `-p library-test` flag prefixes containers, networks, AND volumes
+# with `library-test_`, so `pgdata` becomes `library-test_pgdata` and is
+# fully separate from the dev stack's `pgdata` volume.
+#
+# Ports are shifted by +1 from the dev defaults so both stacks can run
+# concurrently. If any of these collide on your machine, edit here and in
+# test.sh in lockstep.
+#
+# IMPORTANT: the `!override` tag is REQUIRED on every `ports:` field.
+# By default Compose merges list-valued fields across multiple -f files
+# (it concatenates them), so without `!override` you'd end up with BOTH
+# the dev ports (5432, 8080, 50051, 3000) AND the test ports bound on
+# the test stack — defeating the whole point of port isolation. With
+# `!override` Compose replaces the list entirely.
+
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
+
+  api:
+    ports: !override
+      - "50052:50051"
+    environment:
+      # Force DEMO_MODE off — tests start against an empty schema and
+      # create their own data. Seeded data would interfere with
+      # Playwright's "create a unique book then verify it appears" flow.
+      DEMO_MODE: "false"
+
+  envoy:
+    ports: !override
+      - "8081:8080"
+      - "9902:9901"
+
+  web:
+    ports: !override
+      - "3001:3000"
+    environment:
+      # Browser hits Envoy on the host's :8081 (the test stack's listener).
+      NEXT_PUBLIC_API_BASE_URL: "http://localhost:8081"

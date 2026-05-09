@@ -99,11 +99,15 @@ WORKDIR /app
 
 # Copy the prebuilt venv, source, alembic config + scripts, entrypoint, and
 # the health probe. Alembic needs both alembic.ini and the alembic/ directory
-# at runtime to execute `alembic upgrade head` from the entrypoint.
+# at runtime to execute `alembic upgrade head` from the entrypoint. The
+# scripts/ directory ships at runtime too because the entrypoint invokes
+# `reset_and_seed.py` when DEMO_MODE=true and the rubric's sample-client
+# walkthrough invokes `sample_client.py` via `docker compose exec`.
 COPY --from=builder --chown=library:library /app/.venv /app/.venv
 COPY --from=builder --chown=library:library /app/src /app/src
 COPY --from=builder --chown=library:library /app/alembic.ini /app/alembic.ini
 COPY --from=builder --chown=library:library /app/alembic /app/alembic
+COPY --from=builder --chown=library:library /app/scripts /app/scripts
 COPY --from=builder --chown=library:library /app/entrypoint.sh /app/entrypoint.sh
 COPY --from=builder /usr/local/bin/grpc_health_probe /usr/local/bin/grpc_health_probe
 
