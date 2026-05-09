@@ -22,6 +22,7 @@ from library.generated.library.v1 import library_pb2
 from library.repositories import loans as loans_repo
 from library.repositories import members as members_repo
 from library.repositories.loans import FineConfig
+from library.resilience import RETRY_READ, RETRY_WRITE_TX, with_retry
 from library.services.conversions import (
     clamp_pagination,
     datetime_to_pb,
@@ -46,6 +47,7 @@ class MemberService:
 
     # ---------- mutations ----------
 
+    @with_retry(RETRY_WRITE_TX)
     async def create_member(
         self, request: library_pb2.CreateMemberRequest
     ) -> library_pb2.CreateMemberResponse:
@@ -79,6 +81,7 @@ class MemberService:
 
         return library_pb2.CreateMemberResponse(member=member_proto)
 
+    @with_retry(RETRY_WRITE_TX)
     async def update_member(
         self, request: library_pb2.UpdateMemberRequest
     ) -> library_pb2.UpdateMemberResponse:
@@ -118,6 +121,7 @@ class MemberService:
 
     # ---------- reads ----------
 
+    @with_retry(RETRY_READ)
     async def get_member(
         self, request: library_pb2.GetMemberRequest
     ) -> library_pb2.GetMemberResponse:
@@ -158,6 +162,7 @@ class MemberService:
 
         return library_pb2.GetMemberResponse(member=member_proto)
 
+    @with_retry(RETRY_READ)
     async def list_members(
         self, request: library_pb2.ListMembersRequest
     ) -> library_pb2.ListMembersResponse:

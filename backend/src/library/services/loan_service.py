@@ -25,6 +25,7 @@ from library.errors import InvalidArgument
 from library.generated.library.v1 import library_pb2
 from library.repositories import loans as loans_repo
 from library.repositories.loans import FineConfig, LoanFilter, LoanRow
+from library.resilience import RETRY_READ, RETRY_WRITE_TX, with_retry
 from library.services.conversions import clamp_pagination, datetime_to_pb
 from library.services.fines import compute_fine_cents
 
@@ -53,6 +54,7 @@ class LoanService:
 
     # ---------- mutations ----------
 
+    @with_retry(RETRY_WRITE_TX)
     async def borrow_book(
         self, request: library_pb2.BorrowBookRequest
     ) -> library_pb2.BorrowBookResponse:
@@ -100,6 +102,7 @@ class LoanService:
 
         return library_pb2.BorrowBookResponse(loan=loan_proto)
 
+    @with_retry(RETRY_WRITE_TX)
     async def return_book(
         self, request: library_pb2.ReturnBookRequest
     ) -> library_pb2.ReturnBookResponse:
@@ -143,6 +146,7 @@ class LoanService:
 
     # ---------- reads ----------
 
+    @with_retry(RETRY_READ)
     async def list_loans(
         self, request: library_pb2.ListLoansRequest
     ) -> library_pb2.ListLoansResponse:
@@ -184,6 +188,7 @@ class LoanService:
             total_count=result.total_count,
         )
 
+    @with_retry(RETRY_READ)
     async def get_member_loans(
         self, request: library_pb2.GetMemberLoansRequest
     ) -> library_pb2.GetMemberLoansResponse:

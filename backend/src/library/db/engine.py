@@ -45,9 +45,18 @@ _engine: AsyncEngine | None = None
 def get_engine() -> AsyncEngine:
     """Return the process-wide :class:`AsyncEngine`, building it on first call.
 
-    The engine uses the SQLAlchemy default ``QueuePool`` async equivalent
-    (``AsyncAdaptedQueuePool``); pool sizing knobs are left at their defaults
-    for now and can be tuned in a later phase if load testing reveals a need.
+    Pool and timeout knobs come from :class:`library.config.Settings` (Phase
+    5.6). The four interlocking timeouts are:
+
+    * asyncpg ``command_timeout`` — driver-side wall-clock per statement.
+    * Postgres ``statement_timeout`` — server-side: actually stops the work
+      and releases locks when exceeded.
+    * Postgres ``lock_timeout`` — bounds non-deadlock lock waits; set lower
+      than ``statement_timeout`` so a lock wait surfaces clearly as
+      ``lock_not_available`` rather than as a generic statement timeout.
+    * Postgres ``idle_in_transaction_session_timeout`` — kills forgotten
+      BEGINs so dead connections eventually return to the pool, where
+      ``pool_pre_ping`` discards them.
 
     Raises:
         sqlalchemy.exc.ArgumentError: if ``settings.database_url`` is not a
@@ -56,11 +65,51 @@ def get_engine() -> AsyncEngine:
 
     global _engine
     if _engine is None:
-        url = get_settings().database_url
+        settings = get_settings()
+        url = settings.database_url
         logger.info("library.db: creating async engine for %s", _redact_password(url))
-        # ``future=True`` is the 2.0-style API; explicit for clarity even though
-        # it is the default in SQLAlchemy 2.x.
-        _engine = create_async_engine(url, future=True, pool_pre_ping=True)
+
+        connect_args: dict[str, object] = {
+            # asyncpg's driver-side per-command timeout. Mirrors
+            # statement_timeout so callers don't see daemonic hangs even if
+            # PG's server-side enforcement is somehow disabled.
+            "command_timeout": settings.db_command_timeout_s,
+            # Per-connection Postgres GUCs applied at connect time. The
+            # millisecond-resolution timeouts must be passed as strings —
+            # asyncpg's server_settings doesn't accept ints.
+            "server_settings": {
+                "statement_timeout": str(settings.db_statement_timeout_ms),
+                "lock_timeout": str(settings.db_lock_timeout_ms),
+                "idle_in_transaction_session_timeout": str(
+                    settings.db_idle_tx_timeout_ms
+                ),
+            },
+        }
+
+        # Invariant assertion: lock_timeout < statement_timeout so a lock
+        # wait surfaces as the clearer error class. See
+        # docs/phases/phase-5-6-resilience.md §"Notes & risks".
+        if (
+            settings.db_statement_timeout_ms > 0
+            and settings.db_lock_timeout_ms >= settings.db_statement_timeout_ms
+        ):
+            logger.warning(
+                "library.db: lock_timeout (%dms) should be < statement_timeout (%dms); "
+                "lock waits will surface as statement_timeout",
+                settings.db_lock_timeout_ms,
+                settings.db_statement_timeout_ms,
+            )
+
+        _engine = create_async_engine(
+            url,
+            future=True,
+            pool_pre_ping=True,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_s,
+            pool_recycle=settings.db_pool_recycle_s,
+            connect_args=connect_args,
+        )
     return _engine
 
 

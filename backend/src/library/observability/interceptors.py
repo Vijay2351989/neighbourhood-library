@@ -27,6 +27,8 @@ from grpc.aio import ServerInterceptor
 from opentelemetry import trace
 
 from library.observability.logging_config import request_id_var
+from library.resilience.deadline import DEADLINE_VAR, set_deadline_from_grpc_context
+from library.resilience.decorator import RETRY_ATTEMPTS_VAR
 
 logger = logging.getLogger("library.access")
 
@@ -63,6 +65,10 @@ class RequestContextInterceptor(ServerInterceptor):
         async def wrapper(request: Any, context: grpc.aio.ServicerContext) -> Any:
             request_id = uuid.uuid4().hex
             token = request_id_var.set(request_id)
+            # Stamp the gRPC deadline on a contextvar so the retry decorator
+            # can size its sleeps to the client's remaining budget. Returns
+            # None if the client didn't supply a deadline.
+            deadline_token = set_deadline_from_grpc_context(context)
 
             # Stamp on the active root span (from OTel grpc instrumentation).
             span = trace.get_current_span()
@@ -104,9 +110,16 @@ class RequestContextInterceptor(ServerInterceptor):
                             "rpc.status": status_name,
                             "rpc.duration_ms": round(duration_ms, 2),
                             "peer": _safe_peer(context),
+                            # Total attempts for this RPC; 1 means no retry
+                            # fired. The retry decorator increments this
+                            # contextvar; un-decorated handlers leave it at
+                            # the default of 1.
+                            "retry.attempts": RETRY_ATTEMPTS_VAR.get(),
                         },
                     )
                 request_id_var.reset(token)
+                if deadline_token is not None:
+                    DEADLINE_VAR.reset(deadline_token)
 
         return wrapper
 

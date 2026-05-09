@@ -66,6 +66,85 @@ class Settings(BaseSettings):
         description="Maximum fine that can accrue on a single loan, in cents.",
     )
 
+    # ---------- Phase 5.6 resilience knobs ----------
+    #
+    # All sized for single-replica local dev. When N > 1 the pool numbers must
+    # be divided by replica count so total = N * (pool_size + max_overflow)
+    # stays under Postgres `max_connections`.
+
+    db_statement_timeout_ms: int = Field(
+        default=5000,
+        ge=0,
+        description=(
+            "Postgres `statement_timeout`. Bounds total wall-clock per "
+            "statement; PG actually stops the work and releases locks when "
+            "exceeded. 0 disables — only useful for explicit long-running "
+            "admin operations."
+        ),
+    )
+
+    db_lock_timeout_ms: int = Field(
+        default=3000,
+        ge=0,
+        description=(
+            "Postgres `lock_timeout`. Bounds non-deadlock lock waits. Set "
+            "lower than statement_timeout so a lock wait surfaces as the "
+            "clearer `lock_not_available` rather than `statement_timeout`."
+        ),
+    )
+
+    db_idle_tx_timeout_ms: int = Field(
+        default=15000,
+        ge=0,
+        description=(
+            "Postgres `idle_in_transaction_session_timeout`. Kills a "
+            "forgotten BEGIN. Higher than the longest expected handler so "
+            "it doesn't fire during normal slow paths."
+        ),
+    )
+
+    db_pool_size: int = Field(
+        default=10,
+        ge=1,
+        description="SQLAlchemy warm-pool size per worker.",
+    )
+
+    db_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description="SQLAlchemy burst overflow above pool_size.",
+    )
+
+    db_pool_timeout_s: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "Seconds to wait for a free connection before raising "
+            "`TimeoutError`. Fast-fail under saturation rather than the "
+            "30-second SQLAlchemy default."
+        ),
+    )
+
+    db_pool_recycle_s: int = Field(
+        default=1800,
+        ge=0,
+        description=(
+            "Recycle (close and re-open) connections older than this many "
+            "seconds. Defends against firewall idle-kills."
+        ),
+    )
+
+    db_command_timeout_s: float = Field(
+        default=5.0,
+        ge=0.0,
+        description=(
+            "asyncpg driver-side command timeout. Bounds how long Python "
+            "waits for a single statement; the server-side "
+            "statement_timeout is what actually frees DB resources, so "
+            "keep this >= statement_timeout."
+        ),
+    )
+
 
 _settings: Settings | None = None
 

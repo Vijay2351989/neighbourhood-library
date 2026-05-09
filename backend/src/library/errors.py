@@ -9,6 +9,12 @@ applies :func:`map_domain_errors` to translate them into the matching
 2. The servicer methods read as pure proto-in/proto-out glue. Error mapping
    is declarative (a decorator) instead of try/except scattered throughout.
 
+Phase 5.6 extension: post-retry transient infrastructure errors (deadlock,
+serialization, lock-timeout, connection-drop, pool-timeout, statement-
+timeout) are mapped to ``UNAVAILABLE`` / ``RESOURCE_EXHAUSTED`` so well-
+behaved clients can retry. ``record_exception`` runs in both branches so
+the trace UI shows the failure.
+
 See [docs/design/02-api-contract.md §2](../../docs/design/02-api-contract.md)
 for the canonical failure -> status table.
 """
@@ -60,6 +66,29 @@ _DOMAIN_TO_GRPC_STATUS: dict[type[DomainError], grpc.StatusCode] = {
 }
 
 
+def _map_transient_class_to_grpc(error_class):  # type: ignore[no-untyped-def]
+    """Translate a :class:`library.resilience.ErrorClass` to a gRPC status.
+
+    Imported lazily inside the function to avoid a load-order coupling
+    between ``errors`` and ``resilience``. Returns ``None`` if the class is
+    not infrastructure-transient (e.g. it's INTEGRITY or DOMAIN).
+    """
+
+    from library.resilience.classify import ErrorClass
+
+    if error_class is ErrorClass.POOL_TIMEOUT:
+        return grpc.StatusCode.RESOURCE_EXHAUSTED
+    if error_class in {
+        ErrorClass.DEADLOCK,
+        ErrorClass.SERIALIZATION,
+        ErrorClass.LOCK_TIMEOUT,
+        ErrorClass.CONNECTION_DROPPED,
+        ErrorClass.STATEMENT_TIMEOUT,
+    }:
+        return grpc.StatusCode.UNAVAILABLE
+    return None
+
+
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 
@@ -95,13 +124,31 @@ def map_domain_errors(fn: F) -> F:
             # already-set status reaches the client.
             raise
         except Exception as exc:
-            # Anything we don't recognize is a bug. Log with traceback and
-            # surface as INTERNAL with a generic message; mark the span so
-            # the trace shows the failure clearly.
+            # Phase 5.6: classify post-retry transient errors and surface
+            # them with a meaningful gRPC status (UNAVAILABLE for transient
+            # DB issues, RESOURCE_EXHAUSTED for pool exhaustion). Anything
+            # else is a real bug → INTERNAL.
+            from library.resilience.classify import classify
+
+            cls = classify(exc)
+            grpc_status = _map_transient_class_to_grpc(cls)
+
             span = trace.get_current_span()
             if span is not None and span.is_recording():
-                span.set_status(Status(StatusCode.ERROR, "internal error"))
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
+
+            if grpc_status is not None:
+                # Don't dump traceback at WARNING — these are expected under
+                # load. INFO with the classification keeps logs readable.
+                logger.info(
+                    "transient %s in %s mapped to %s",
+                    cls.value,
+                    fn.__qualname__,
+                    grpc_status.name,
+                )
+                await context.abort(grpc_status, f"{cls.value}: {exc}")
+
             logger.exception("uncaught error in %s", fn.__qualname__)
             await context.abort(grpc.StatusCode.INTERNAL, "internal error")
 

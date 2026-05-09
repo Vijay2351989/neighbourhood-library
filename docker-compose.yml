@@ -69,6 +69,17 @@ services:
       OTEL_LOGS_EXPORTER: "${OTEL_LOGS_EXPORTER:-console}"
       OTEL_METRICS_EXPORTER: "none"
       OTEL_PROPAGATORS: "tracecontext,baggage"
+      # Phase 5.6 resilience — db timeouts and pool tuning. These are the
+      # production-sane defaults; tests override them via env to surface
+      # failures faster (lower lock_timeout, smaller pool, etc.).
+      DB_STATEMENT_TIMEOUT_MS: "${DB_STATEMENT_TIMEOUT_MS:-5000}"
+      DB_LOCK_TIMEOUT_MS: "${DB_LOCK_TIMEOUT_MS:-3000}"
+      DB_IDLE_TX_TIMEOUT_MS: "${DB_IDLE_TX_TIMEOUT_MS:-15000}"
+      DB_POOL_SIZE: "${DB_POOL_SIZE:-10}"
+      DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-10}"
+      DB_POOL_TIMEOUT_S: "${DB_POOL_TIMEOUT_S:-5}"
+      DB_POOL_RECYCLE_S: "${DB_POOL_RECYCLE_S:-1800}"
+      DB_COMMAND_TIMEOUT_S: "${DB_COMMAND_TIMEOUT_S:-5}"
     ports:
       - "50051:50051"
     depends_on:

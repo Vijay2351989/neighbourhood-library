@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from library.errors import FailedPrecondition, InvalidArgument
 from library.generated.library.v1 import library_pb2
 from library.repositories import books as books_repo
+from library.resilience import RETRY_READ, RETRY_WRITE_TX, with_retry
 from library.services.conversions import (
     clamp_pagination,
     datetime_to_pb,
@@ -35,6 +36,7 @@ class BookService:
 
     # ---------- mutations ----------
 
+    @with_retry(RETRY_WRITE_TX)
     async def create_book(
         self, request: library_pb2.CreateBookRequest
     ) -> library_pb2.CreateBookResponse:
@@ -75,6 +77,7 @@ class BookService:
 
         return library_pb2.CreateBookResponse(book=book_proto)
 
+    @with_retry(RETRY_WRITE_TX)
     async def update_book(
         self, request: library_pb2.UpdateBookRequest
     ) -> library_pb2.UpdateBookResponse:
@@ -149,6 +152,7 @@ class BookService:
 
     # ---------- reads ----------
 
+    @with_retry(RETRY_READ)
     async def get_book(
         self, request: library_pb2.GetBookRequest
     ) -> library_pb2.GetBookResponse:
@@ -161,6 +165,7 @@ class BookService:
 
         return library_pb2.GetBookResponse(book=book_proto)
 
+    @with_retry(RETRY_READ)
     async def list_books(
         self, request: library_pb2.ListBooksRequest
     ) -> library_pb2.ListBooksResponse:
