@@ -271,18 +271,6 @@ PLAYWRIGHT_BASE_URL=http://localhost:3001 npx playwright test --grep "borrow"
 
 ---
 
-## Manual API verification
-
-For wire-level checks that complement the automated tests, see [`docs/test_api.md`](test_api.md). It documents three command paths against the live stack:
-
-- `grpcurl localhost:50051 ...` — direct to the api container, native gRPC
-- `grpcurl localhost:8080 ...` — through Envoy, native gRPC (passthrough)
-- `buf curl --protocol=grpcweb http://localhost:8080/...` — through Envoy as gRPC-Web (the path the React app uses)
-
-These are useful when an automated test fails and you want to bisect "is it the backend, the wire format, or the browser?" without standing up a full debug session.
-
----
-
 ## Troubleshooting
 
 ### "port already in use"

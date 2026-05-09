@@ -1,258 +1,185 @@
 # Neighborhood Library
 
-A take-home build of a small library management service. Staff can manage books and members, lend copies out, take them back, and see who owes what in fines. The whole stack — Postgres, a Python gRPC service, an Envoy gRPC-Web proxy, and a Next.js staff UI — comes up with a single `docker compose up`.
+A staff-facing application for a small neighborhood library to manage its **books**, **members**, and **lending operations** (borrow, return, overdue handling, fine tracking).
 
-> **Looking for the design rationale?** Start at [`docs/README.md`](docs/README.md). The phase-by-phase implementation plan lives under [`docs/phases/`](docs/phases/) and the per-area design docs live under [`docs/design/`](docs/design/).
+Built as a self-hosted, single-tenant tool: install behind the library's front desk, open the URL, and start cataloging. There is no login screen — anyone with network access to the app is implicitly trusted as staff. Members are the people who walk in to borrow books; they never touch the application.
 
----
-
-## Architecture overview
-
-```
-+----------------------+       +-----------------+       +-------------------------+       +----------------+
-|                      |       |                 |       |                         |       |                |
-|  Next.js staff UI    | ----> |  Envoy proxy    | ----> |  Python gRPC service    | ----> |  PostgreSQL    |
-|  (browser, :3000)    | gRPC- |  (:8080,        | HTTP/2|  (:50051,               | TCP   |  (:5432)       |
-|                      |  Web  |   admin :9901)  | native|   LibraryService impl)  |       |                |
-|  gRPC-Web client     |       |  grpc_web + CORS|  gRPC |  SQLAlchemy 2.0 async   |       |                |
-|  (Connect-Web stubs) |       |   filters       |       |  Alembic migrations     |       |                |
-+----------------------+       +-----------------+       +-------------------------+       +----------------+
-```
-
-The browser cannot speak native gRPC's HTTP/2 framing directly, so the UI talks **gRPC-Web** to Envoy, which translates to native gRPC on the way to the Python server. The same `LibraryService` proto contract drives both sides — the backend regenerates Python stubs and the frontend regenerates TypeScript stubs from the single `proto/library/v1/library.proto`.
-
-The Python service is layered: a thin proto-aware servicer (`library.servicer`) calls into proto-free domain services (`library.services.*`) which call into proto-free repositories (`library.repositories.*`) which own the SQL. The split keeps tests against real Postgres (via testcontainers) clean of mock plumbing. Concurrency safety on the borrow path is structural — a partial unique index on `loans(copy_id) WHERE returned_at IS NULL` makes double-borrow a database-level invariant. Fine policy is computed at query time, not stored, so no cron job ever lies about today's fine total.
+Stack at a glance: **Python gRPC** backend, **Envoy** as a gRPC-Web translator, **PostgreSQL** for storage, **Next.js + React + TypeScript** UI calling the backend over **gRPC-Web**, all wired together by **Docker Compose**.
 
 ---
 
-## Prerequisites
+## Key functional scenarios
 
-For the basic `docker compose up` flow you need only:
+What a librarian actually does with the app, mapped to the routes that handle each:
 
-- **Docker Desktop** (or any Docker engine new enough for Compose v2 named build contexts — Docker 23+).
+| Scenario | What happens | Where it lives |
+|---|---|---|
+| **Open shop in the morning** | Glance at the dashboard — total books, total members, active loans, overdue count, total outstanding fines, recent activity feed | `/` |
+| **Register a new patron** | Patron walks in for the first time; staff fills name + email (+ optional phone, address) | `/members/new` |
+| **Record a borrow** | Patron hands over a book; staff picks the patron, picks the book, optionally overrides the due date, confirms | `/loans/new` |
+| **Record a return** | Patron returns a book; staff finds the active loan on the patron's profile, clicks Return | `/members/[id]` (Active tab) |
+| **Manage the catalog** | New shipment → create the book with N copies. Existing book → adjust copy count up/down (down is rejected if the count would drop below currently-borrowed) | `/books`, `/books/new`, `/books/[id]/edit` |
+| **Audit overdue / fines** | End of week: filter loans by Overdue or Has Fine; click into a member to see their outstanding total | `/loans` (filter chips), `/members/[id]` (fines tile) |
 
-Optional extras for local development outside the containers:
+Optional features that go beyond the minimum (and exercise the tricky parts of the design):
 
-- **Python 3.12+** and [`uv`](https://docs.astral.sh/uv/) for backend hacking
-- **Node 20+** for frontend hacking
-- [`buf`](https://buf.build) if you want to regenerate proto stubs without going through `npm`
+- **Computed fines.** Loans accrue $0.25/day after a 14-day grace period past due, capped at $20. Fines are computed at query time, never stored — see [`docs/design/01-database.md` §5](docs/design/01-database.md#5-fine-policy-computed-not-stored).
+- **Concurrency-safe borrowing.** A `partial unique index` on `loans(copy_id) WHERE returned_at IS NULL` plus `SELECT ... FOR UPDATE SKIP LOCKED` guarantees that two concurrent borrow requests for the same physical copy cannot succeed — see [`docs/design/01-database.md` §3](docs/design/01-database.md#3-concurrency-strategy-the-partial-unique-index).
+- **Resilience layer.** Service methods are wrapped with a typed retry decorator (`@with_retry(RETRY_READ)` / `RETRY_WRITE_TX`) that classifies database exceptions and applies exponential backoff with jitter, all bounded by the active gRPC deadline.
+- **Observability.** OpenTelemetry traces, span events for retries, structured access logs that include request attempt counts. Optional SigNoz overlay via a Compose profile.
 
 ---
 
 ## Quick start
 
+For a one-screen "see it working" — Docker is the only prerequisite:
+
 ```sh
-git clone <this-repo> neighborhood-library
+git clone <repo-url> neighborhood-library
 cd neighborhood-library
-docker compose up
+
+# (Optional) copy the env template if you want to tune anything
+cp .env.example .env
+
+docker compose up -d
 ```
 
-That's it for a production-style empty bring-up — wait for the api log line `library api: listening on :50051` and open <http://localhost:3000>. The UI loads against an empty database; you can immediately create a book, create a member, and borrow.
+After ~30 seconds (or ~3-5 minutes on first run while images build), open:
 
-To start with the demo fixture instead — ~20 books, ~10 members, and a mix of active, returned, overdue, and fine-bearing loans:
+| URL | What you'll see |
+|---|---|
+| **http://localhost:3000** | The staff UI dashboard with five count tiles — the app itself |
+| **http://localhost:8082** | **gRPC API explorer** (Swagger-equivalent) — interactive form-based UI to call any RPC, generated automatically from the proto via gRPC reflection |
+
+To see the app populated with sample data instead of empty:
 
 ```sh
-DEMO_MODE=true docker compose up
+docker compose down -v          # wipe any prior state
+DEMO_MODE=true docker compose up -d
 ```
 
-`DEMO_MODE=true` makes the api container truncate every table and reseed it on startup. Re-run `DEMO_MODE=true docker compose restart api` any time you want to reset to a clean demo state. Without `DEMO_MODE`, the api never touches existing data.
+This seeds 21 books, 10 members, 11 loans (including overdue and fined loans) on every startup, so you can see filters, the fines tile, and the dashboard counts populated.
+
+### Env vars
+
+Every environment variable across the stack is documented in [**`.env.example`**](.env.example) at the repo root. Copy to `.env` (gitignored) and tweak — Compose auto-loads it. For full guidance on overrides per scenario (Path A Docker, Path B fully-local, hybrid), see [`docs/setup.md` § Configuration overrides](docs/setup.md#configuration-overrides).
+
+For everything else — port-conflict troubleshooting, running without Docker, hybrid configurations, fully-local Python + Node + Postgres + Envoy setup, verification checklists — see [**`docs/setup.md`**](docs/setup.md).
 
 ---
 
-## What you can do
+## Where to go next
 
-The staff UI at <http://localhost:3000> covers every assignment requirement plus fine visibility:
-
-- **Dashboard** (`/`) — five tiles (total books, members, active loans, overdue loans, outstanding fines) plus a "recent activity" feed.
-- **Books** (`/books`) — list with case-insensitive prefix search, paginated. `/books/new` and `/books/[id]/edit` for create/update; the "number of copies" field reconciles physical inventory under the hood. The detail page shows total vs. available copies and recent loans for that title.
-- **Members** (`/members`) — list with search; `/members/new` and `/members/[id]/edit`. The detail page shows the member's outstanding fines (computed) and a tabbed history of active vs. returned loans.
-- **Loans** (`/loans`) — chip-filtered list (All / Active / Overdue / Has Fine / Returned). `/loans/new` is the borrow flow: pick a book and a member from search-as-you-type pickers, confirm in a dialog, and the loan appears with the server-computed `due_at`. Each row has a Return button that flips `returned_at` and refreshes the list.
-- **Fines** are visible everywhere they're relevant — on the dashboard tile, on the member detail page, on every overdue loan in the loans list. Returned-late loans keep the snapshot fine on the row forever (per the [fine policy](docs/design/01-database.md#5-fine-policy-computed-not-stored)).
-
----
-
-## Database setup
-
-Postgres 16 runs in the `postgres` Compose service. State lives in the named volume `pgdata`, so the database survives `docker compose down` (which only stops containers) but is cleared by `docker compose down -v` (which removes volumes).
-
-The api container runs `alembic upgrade head` on every start (see `backend/entrypoint.sh`), so the schema is always current — no manual migration step required. To inspect the live schema:
-
-```sh
-docker compose exec postgres psql -U postgres library -c '\dt'
-```
-
-To reset the database to an empty schema:
-
-```sh
-docker compose down -v
-docker compose up
-```
-
-To reset to the demo fixture (truncate-and-reseed without nuking the volume):
-
-```sh
-DEMO_MODE=true docker compose restart api
-```
-
-To point the api at an external Postgres instead of the bundled one, set `DATABASE_URL` (see [Environment variables](#environment-variables)) and remove the `postgres` service from `docker-compose.yml` (or stop depending on it).
+| If you want to... | Read |
+|---|---|
+| **Get the app running** (detailed prerequisites, Docker path, fully-local path, verification, troubleshooting) | [`docs/setup.md`](docs/setup.md) |
+| **Understand the architecture** (components, why gRPC-Web, how Envoy fits, tech-stack rationale) | [`docs/architecture.md`](docs/architecture.md) |
+| **Make code changes** (backend / frontend layering, codegen, retry+timeout nuances, dev recipes) | [`docs/development.md`](docs/development.md) |
+| **Run all tests / set up a dev test loop** | [`docs/test.md`](docs/test.md) |
+| **Look up an env var** (purpose, default, where consumed, what changes when you set it) | [`docs/configuration.md`](docs/configuration.md) |
+| **Understand the Docker stack** (how Compose wires services, Dockerfiles, healthchecks, the seed system, observability profile) | [`docs/deploy.md`](docs/deploy.md) |
+| **Understand a specific subsystem** | [`docs/design/`](docs/design/) — five focused design docs (database, API contract, backend, frontend, infrastructure) |
+| **See how the project was built** | [`docs/phases/`](docs/phases/) — seven phase docs walking through the sequential implementation |
+| **Look up why a decision was made** | [`docs/reference/decisions.md`](docs/reference/decisions.md) — central registry of design decisions |
+| **Read the original spec** | [`docs/00-overview.md`](docs/00-overview.md), or the archived monolith at [`docs/archive/SPEC-monolithic.md`](docs/archive/SPEC-monolithic.md) |
 
 ---
 
-## .proto compilation
+## Project status
 
-The single source of truth is `proto/library/v1/library.proto`. Both Dockerfiles regenerate from it during their image builds, so a fresh `docker compose build` is sufficient to pick up changes. To regenerate stubs locally without rebuilding images:
+### What's complete
 
-```sh
-# Backend (Python stubs into backend/src/library/generated/library/v1/)
-cd backend && uv run bash scripts/gen_proto.sh
+A working four-tier staff application — the librarian opens `http://localhost:3000` and can do everything in the [Key functional scenarios](#key-functional-scenarios) table above. The full surface includes:
 
-# Frontend (TypeScript Connect-Web stubs into frontend/src/generated/library/v1/)
-cd frontend && npm run gen:proto
-```
+- 12 gRPC RPCs covering book CRUD, member CRUD, and loan lifecycle (borrow / return / list / get-member-loans)
+- Schema with normalized `Book` / `BookCopy` split, computed fines (no fines column), and a partial unique index that makes double-borrow structurally impossible
+- Resilience layer with three named retry policies, deadline-aware backoff, and four interlocking database timeouts
+- OpenTelemetry tracing with an opt-in self-hosted SigNoz overlay
+- Backend integration tests against a real Postgres (testcontainers), plus a Playwright happy-path browser test
+- One-command bring-up via Docker Compose, with a `DEMO_MODE` toggle for ephemeral seeded data
 
-The backend generator also rewrites a quirk in protoc's emitted import path; see the comment block at the top of `backend/scripts/gen_proto.sh` for the gory detail.
+For per-phase implementation detail, see [`docs/phases/`](docs/phases/) (seven phases, all CTO-certified `<promise>DONE</promise>` per [`docs/progress-report.md`](docs/progress-report.md)).
 
----
+### What's intentionally NOT done
 
-## Running outside Docker
+These were considered, discussed, and deliberately excluded from scope. Each entry explains *what it is*, *why it's excluded*, and *what it would take to add later*.
 
-Useful when iterating on the Python service with a debugger attached. With the bundled Postgres still running (`docker compose up postgres`), in another terminal:
+#### 1. Authentication and authorization
 
-```sh
-cd backend
-uv sync                                     # install runtime + dev deps
-uv run alembic upgrade head                 # run migrations
-uv run python -m library.main               # start the gRPC server
-```
+- **What it would be:** A login flow, user accounts for staff, password hashing, session/JWT issuance, gRPC interceptor validating credentials, and per-RPC permission checks.
+- **Why excluded:** This is a **single-tenant, on-premise staff tool**. The deployment model is "install on the front-desk machine; anyone with network access is implicitly trusted as staff" — same security boundary as a coffee shop's POS terminal or a museum kiosk. Adding auth would invent a problem the deployment shape doesn't have, and the assignment rubric doesn't score auth-specific work.
+- **What adding it would take:** A `users` table + Argon2/bcrypt password hashing, a login RPC, a gRPC interceptor that validates a JWT from the `authorization` metadata header, and auth-aware UI states (login screen, redirect on 401, logout). Roughly 8-15 hours, none of which would move the rubric needle. See [the auth-related discussion in `docs/architecture.md` §2](docs/architecture.md) and the related rationale in [`docs/00-overview.md` §4 non-goals](docs/00-overview.md#4-explicit-non-goals).
 
-The server reads `DATABASE_URL` from your environment; export it if you've changed it from the default. The frontend can run outside Docker too:
+#### 2. Rate limiting
 
-```sh
-cd frontend
-npm install
-npm run dev                                 # http://localhost:3000
-```
+- **What it would be:** Per-client request quotas (e.g., max 100 RPCs/minute per source IP) enforced at the Envoy edge or in a dedicated middleware layer.
+- **Why excluded:** Rate limiting protects against abuse from untrusted clients. With **no untrusted clients** (single-tenant trusted network — see #1), there's no abuse vector worth defending against. The cost of adding it (configuration, tuning, debugging false-positive blocks) exceeds the value at this scale.
+- **What adding it would take:** Either Envoy's `local_ratelimit` filter (cheapest — config in `envoy.yaml`, no extra services) or `ratelimit` filter with a separate Redis-backed quota service (industrial-grade). For a multi-tenant SaaS deployment of this code, this would become important. For the take-home it's noise.
 
-You'll still need Envoy (`docker compose up envoy`) so the browser has a gRPC-Web target to talk to.
+#### 3. Caching layer
 
----
+- **What it would be:** A read-through cache (Redis or in-process LRU) in front of `ListBooks` / `ListMembers` / `GetBook` to reduce database hits on hot reads.
+- **Why excluded:** **Premature optimization.** A neighborhood library has hundreds of books and members, not millions. The aggregate `available_copies` query joins `book_copies` and counts — at this scale it returns in single-digit milliseconds against the indexed `(book_id, status)` composite. There's no measurable performance problem to solve. Adding cache invariants (TTL, invalidation on writes, consistency between cache and DB) would introduce bugs without benefit.
+- **What adding it would take:** Either an LRU cache in `repositories/books.py` keyed by `(search, offset)` with TTL, or a Redis cache shared across replicas. Both would also need cache-busting on writes (`CreateBook` invalidates list cache, etc.). Worth doing if list-page latency exceeds ~50ms at production scale; a non-issue today.
 
-## Environment variables
+#### 4. Member-facing service (`library.public.v1`)
 
-All knobs are read from the api container's environment; defaults match the values in `docker-compose.yml`.
+*One of the two "considered but not built" services.*
 
-| Variable | Default | What it does |
+- **What it would be:** A separate gRPC service surface — likely in a different proto package (`library.public.v1`) with its own RPCs — for **patrons interacting with the system themselves**. Examples: browse the catalog from home, place a hold on a checked-out book, renew a loan online, view their own outstanding fines.
+- **Why excluded:** Out of scope per the assignment, and adds an entire dimension the current model doesn't need:
+  - Member-facing **UI** (different page tree from staff)
+  - **Authentication** (members would have credentials — bringing back #1)
+  - **Authorization** (members can only see *their own* loans, not everyone's)
+  - A **separate proto package** so admin RPCs aren't accidentally exposed
+  - Probably an **API gateway** (separate Envoy listener) for public-facing traffic
+- **What adding it would take:** Real engineering effort — easily a sprint of work. The current backend's clean layering would help (the `loan_service` already has `GetMemberLoans` which is naturally member-scoped), but adding auth + a parallel UI is the bulk of the work. A common pattern would be to deploy this as a separate `library-public` service binary that shares the database with the staff backend but exposes a different RPC surface.
+
+#### 5. Payment / fine-clearing service
+
+*The second "considered but not built" service.*
+
+- **What it would be:** A service that records **fine payments** and clears outstanding amounts. Right now fines are *computed* (always visible, never paid); this would be the missing piece to actually settle them.
+- **Why excluded:** Fines are computed at query time from `loan.due_at`, `loan.returned_at`, and the policy env vars — there's no fines column in the schema. Adding payments would require:
+  - A `fine_payments` table (`loan_id`, `amount_cents`, `paid_at`, `cashier_id` or similar)
+  - A new `RecordFinePayment` RPC
+  - An updated `compute_fine_cents` that subtracts paid amounts from the computed total
+  - Audit trail thinking (fine waivers, partial payments, refunds)
+  - Possibly a "cash drawer" reconciliation feature
+- **Why it's a meaningful second service:** Payments are a separate **bounded context** from lending. A real library would have separate UI for "borrow/return at the desk" (this app) and "settle fines at the cashier" (the deferred service), with different staff roles and different audit requirements.
+- **What adding it would take:** A new schema migration (~1 hour), the payments service module (~3-4 hours), UI integration to the existing member detail page showing paid-vs-unpaid fine breakdown (~2-3 hours). Total ~8 hours — but with real complexity around the audit/reconciliation requirements that take it from "feature" to "domain." See [`docs/00-overview.md` §4 non-goals](docs/00-overview.md#4-explicit-non-goals) where this is listed explicitly.
+
+### Summary of what we built vs. what we excluded
+
+| Concern | Our choice | Rationale |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@postgres:5432/library` | SQLAlchemy async URL for Postgres. |
-| `GRPC_PORT` | `50051` | TCP port the gRPC server binds to. |
-| `DEFAULT_LOAN_DAYS` | `14` | Loan length when the client doesn't pass an explicit `due_at`. |
-| `FINE_GRACE_DAYS` | `14` | Days past `due_at` before fines start accruing. |
-| `FINE_PER_DAY_CENTS` | `25` | Cents charged per overdue day after the grace period. |
-| `FINE_CAP_CENTS` | `2000` | Maximum fine that can accrue on a single loan ($20.00). |
-| `DEMO_MODE` | `false` | When `true`, api startup truncates every table and reseeds via `backend/scripts/reset_and_seed.py`. |
-| `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8080` | Base URL the browser uses to reach Envoy's gRPC-Web listener. |
+| Authentication | **None** — trusted-network deployment | Single-tenant on-prem staff tool; rubric doesn't score it |
+| Rate limiting | **None** | No untrusted clients in the deployment model |
+| Caching | **None** — query the DB on every read | Library scale doesn't warrant the consistency complexity |
+| Member self-service | **Excluded** — staff-only UI | Whole separate service + UI + auth dimension |
+| Fine payments | **Excluded** — fines computed but never paid | Whole separate service + audit/reconciliation domain |
+| Loan due dates | **Implemented** | Cheap; adds rubric value |
+| Computed fines | **Implemented** | Demonstrates non-trivial domain logic |
+| Concurrency safety | **Implemented** (partial unique index + FOR UPDATE SKIP LOCKED) | Foundational — prevents structural inconsistency |
+| Resilience | **Implemented** (typed retry policies, deadline-aware) | Production-realistic engineering posture |
+| Observability | **Implemented** (OTel + opt-in SigNoz) | Production-realistic engineering posture |
 
-Resilience knobs (`DB_*`, `OTEL_*`) are documented in [`docs/phases/phase-5-6-resilience.md`](docs/phases/phase-5-6-resilience.md) and [`docs/design/06-observability.md`](docs/design/06-observability.md). The defaults are sane for local development; you usually don't need to touch them.
-
----
-
-## Sample client script
-
-`backend/scripts/sample_client.py` is a heavily commented Python walkthrough of the API surface — it doubles as documentation. It connects, creates a member, creates a book with one copy, borrows the book, lists active loans, returns the book, and lists active loans again to prove the borrow disappeared.
-
-After the stack is up:
-
-```sh
-# From inside the api container (no host-side Python required):
-docker compose exec api python /app/scripts/sample_client.py
-
-# Or from the host (after `cd backend && uv sync`):
-uv run python backend/scripts/sample_client.py
-```
-
-The script prints a clean six-step summary and exits 0 on success. If the api isn't running it prints a friendly error pointing you at `docker compose ps`.
+The rule of thumb behind these calls: **build what the rubric scores and what makes the system structurally honest; defer everything that just adds complexity without affecting correctness or evaluability.**
 
 ---
 
-## Testing
+## License
 
-The single entry point is **`./test.sh`** — a parameterized runner that can execute the full pre-deploy pipeline or any individual layer in isolation. Quick reference:
-
-```sh
-./test.sh                    # full pipeline (unit + integration + ts + sample + e2e)
-./test.sh unit               # backend unit tests only (~5s)
-./test.sh integration        # backend integration tests only (~30s, testcontainers)
-./test.sh ts                 # frontend TypeScript check only
-./test.sh sample             # sample client smoke test (brings stack up + tears down)
-./test.sh e2e                # Playwright happy-path (headless)
-./test.sh e2e --headed       # Playwright with visible browser
-./test.sh e2e --debug        # Playwright step-debugger
-./test.sh stack              # bring up an isolated test stack and leave it running
-./test.sh teardown           # tear down a leftover test stack
-./test.sh --help             # full options
-```
-
-The `e2e` and `sample` scenarios automatically bring up an isolated test stack (compose project `library-test` on +1 ports — `5433, 50052, 8081, 9902, 3001`) and tear it down on exit, even on failure or Ctrl+C. They don't touch your dev `pgdata` volume.
-
-For full per-layer documentation, common dev workflows, Playwright debugging tips, and troubleshooting, see [**`docs/test.md`**](docs/test.md).
-
-For wire-level manual verification (`grpcurl`, `buf curl`, gRPC-Web byte inspection), see [**`docs/test_api.md`**](docs/test_api.md).
+MIT. See [`LICENSE`](LICENSE) at the repo root for full terms.
 
 ---
 
-## Troubleshooting
+<!--
+Outline (planned, will fill in incrementally):
 
-**Port conflicts.** This stack binds host ports `5432` (Postgres), `50051` (gRPC), `8080` (Envoy listener), `9901` (Envoy admin), and `3000` (Next.js). When the observability profile is active, also `3301`, `4317`, and `4318`. Find and stop the offending process (`lsof -i :8080`) before bringing the stack up.
-
-**Docker out of memory.** The default 4 GB Docker Desktop allocation is enough for the four core services. Bumping to 6–8 GB is recommended if you also run the SigNoz observability profile, which adds ClickHouse and a query service.
-
-**`UNIMPLEMENTED` from a method that exists.** Almost always means the generated stubs are out of date. Regenerate: `cd backend && uv run bash scripts/gen_proto.sh` and `cd frontend && npm run gen:proto`. Then `docker compose build api web` to bake them into the images.
-
-**Browser CORS error / "no 'Access-Control-Allow-Origin'".** Confirm `envoy` is running (`docker compose ps`) and that `NEXT_PUBLIC_API_BASE_URL` matches the URL the browser is actually loaded from — Envoy's CORS filter allows any origin by default, but the Connect client must be pointed at the proxy, not directly at `:50051`.
-
-**`docker compose up` doesn't seed any data.** Expected — `DEMO_MODE` defaults to `false` for production-style bring-up. Use `DEMO_MODE=true docker compose up` if you want the demo fixture.
-
----
-
-## Project layout
-
-```
-neighborhood-library/
-├── backend/                  Python gRPC service
-│   ├── src/library/          gRPC servicer, services (domain), repositories (SQL), config, db, observability, resilience
-│   ├── alembic/              Schema migrations (single migration; authoritative DDL)
-│   ├── scripts/              gen_proto.sh, reset_and_seed.py (DEMO_MODE), sample_client.py
-│   ├── tests/                JUnit 5 — unit + integration (testcontainers)
-│   ├── Dockerfile            Multi-stage; runs alembic + (optional) seed before serving
-│   └── pyproject.toml        uv-managed; Python 3.12+; runtime + dev extras
-├── frontend/                 Next.js 16 + Tailwind v4 staff UI
-│   ├── src/app/              App Router pages (dashboard, books, members, loans)
-│   ├── src/lib/              Connect client singleton, query keys, error mapping, formatting helpers
-│   ├── src/generated/        Buf/Connect-Web TS stubs (generated; gitignored)
-│   ├── e2e/                  Playwright happy-path test
-│   └── Dockerfile            Builds the Next.js dev image
-├── proto/library/v1/         Single source of truth: library.proto
-├── deploy/
-│   ├── envoy/                envoy.yaml — gRPC-Web translation + CORS
-│   └── signoz/               Optional observability backend (ClickHouse + collector + UI)
-├── docs/
-│   ├── 00-overview.md        Problem, solution, architecture, non-goals
-│   ├── design/               Per-area design docs (db, api, backend, frontend, infra, observability)
-│   ├── phases/               Implementation phase plans (1 through 7)
-│   └── reference/            Decisions log, testing notes, README outline (this file's skeleton)
-├── docker-compose.yml        Four core services + optional observability profile
-├── LICENSE                   MIT
-└── README.md                 You are here
-```
-
----
-
-## Design decisions
-
-The full design rationale — schema choices, API shape, concurrency strategy, fine policy, observability layering — is documented in [`docs/README.md`](docs/README.md) and the per-area files under [`docs/design/`](docs/design/). A few decisions worth calling out:
-
-- **`Book` and `BookCopy` are separate tables.** The abstract title is one row; each physical copy is another. Lets us model "two copies of *Dune*, one borrowed and one on the shelf" honestly. ([01-database.md §2](docs/design/01-database.md#2-why-each-table-looks-this-way))
-- **gRPC-Web through Envoy, not REST.** The browser-side Connect client and the server-side gRPC code share a single proto contract; no hand-written DTO conversion. Envoy handles the gRPC-Web ↔ native gRPC translation. ([00-overview.md §6](docs/00-overview.md#6-architecture))
-- **Fines are computed, not stored.** A pure function in `library.services.fines` and an equivalent SQL expression in `library.repositories.loans` agree on the formula. No cron job, no "today" timezone bug, no invalidation problems. ([01-database.md §5](docs/design/01-database.md#5-fine-policy-computed-not-stored))
-- **Concurrency safety is structural.** A partial unique index on `loans(copy_id) WHERE returned_at IS NULL` makes double-borrow impossible at the database layer. The borrow transaction uses `FOR UPDATE SKIP LOCKED` so popular-title parallel borrows don't serialize. ([01-database.md §3](docs/design/01-database.md#3-concurrency-strategy-the-partial-unique-index))
-- **Demo data is opt-in via `DEMO_MODE`, not a Compose profile.** One env var, one bring-up command, easy to remember. ([phases/phase-7-polish.md](docs/phases/phase-7-polish.md))
+  ✓ 1. Introduction
+  ✓ 2. Quick start
+  ✓ Where to go next (navigation table)
+  ✓ Project status (what's done, intentional non-goals)
+  ✓ License
+-->

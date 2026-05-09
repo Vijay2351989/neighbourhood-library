@@ -36,7 +36,6 @@ Sequential. Each phase ends with something runnable so we can validate before mo
 Total estimated effort: ~50 hours of focused work.
 
 ### Reference
-- **[test_api.md](test_api.md)** — Manual API test runbook. Three command paths (direct API, through Envoy native, through Envoy as gRPC-Web) with what each proves and common failure modes. Living doc — append per-phase commands as features land.
 - **[reference/testing.md](reference/testing.md)** — Layered testing strategy (unit, integration, sample-client smoke, optional Playwright).
 - **[reference/decisions.md](reference/decisions.md)** — Open questions, risks, and the decisions taken on each (ISBN uniqueness, member delete behavior, gRPC-Web tooling, time zones, fine policy, etc.).
 - **[reference/readme-outline.md](reference/readme-outline.md)** — The skeleton of the project's user-facing README that ships in Phase 7.

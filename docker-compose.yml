@@ -144,6 +144,25 @@ services:
       envoy:
         condition: service_started
 
+  grpcui:
+    # Interactive web UI for the gRPC API — the closest thing to "swagger
+    # for gRPC." Uses server reflection (which our backend has registered)
+    # to discover services + methods + message shapes. You can fill in
+    # request fields in a form and call the RPC, just like Swagger UI.
+    #
+    # Browse it at http://localhost:8082 once `docker compose up` is healthy.
+    #
+    # Note: grpcui talks NATIVE gRPC to the api container directly (not
+    # through Envoy), so it bypasses the gRPC-Web translation layer. It's
+    # for API exploration, not for verifying the browser's wire path.
+    image: fullstorydev/grpcui:latest
+    command: ["-port=8080", "-plaintext", "-bind=0.0.0.0", "api:50051"]
+    ports:
+      - "8082:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
   # ---------- observability profile (Phase 5.5b) ----------
   #
   # SigNoz local backend. Gated behind `profiles: ["observability"]` so
