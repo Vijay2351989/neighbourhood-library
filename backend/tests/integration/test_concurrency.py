@@ -25,7 +25,7 @@ import grpc
 import pytest
 from sqlalchemy import text
 
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import book_pb2, loan_pb2, member_pb2
 
 # Number of concurrent borrowers. Larger N stresses the lock manager more
 # but slows test runtime; 10 is enough to surface ordering bugs reliably
@@ -33,26 +33,26 @@ from library.generated.library.v1 import library_pb2
 N_BORROWERS = 10
 
 
-async def _create_member(library_stub, *, email: str) -> int:
-    resp = await library_stub.CreateMember(
-        library_pb2.CreateMemberRequest(name=f"M-{email}", email=email)
+async def _create_member(member_stub, *, email: str) -> int:
+    resp = await member_stub.CreateMember(
+        member_pb2.CreateMemberRequest(name=f"M-{email}", email=email)
     )
     return resp.member.id
 
 
-async def _create_book(library_stub, *, copies: int) -> int:
-    resp = await library_stub.CreateBook(
-        library_pb2.CreateBookRequest(
+async def _create_book(book_stub, *, copies: int) -> int:
+    resp = await book_stub.CreateBook(
+        book_pb2.CreateBookRequest(
             title="Hot Title", author="Z", number_of_copies=copies
         )
     )
     return resp.book.id
 
 
-async def test_concurrent_borrow_one_winner(library_stub) -> None:
-    book_id = await _create_book(library_stub, copies=1)
+async def test_concurrent_borrow_one_winner(book_stub, loan_stub, member_stub) -> None:
+    book_id = await _create_book(book_stub, copies=1)
     member_ids = [
-        await _create_member(library_stub, email=f"m{i}@example.com")
+        await _create_member(member_stub, email=f"m{i}@example.com")
         for i in range(N_BORROWERS)
     ]
 
@@ -60,8 +60,8 @@ async def test_concurrent_borrow_one_winner(library_stub) -> None:
     # AioRpcError losses are returned as values rather than tearing down
     # the gather.
     coros = [
-        library_stub.BorrowBook(
-            library_pb2.BorrowBookRequest(book_id=book_id, member_id=mid)
+        loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=book_id, member_id=mid)
         )
         for mid in member_ids
     ]
@@ -117,7 +117,7 @@ async def test_concurrent_borrow_one_winner(library_stub) -> None:
     assert available_copies == 0
 
 
-async def test_concurrent_borrow_two_copies_two_winners(library_stub) -> None:
+async def test_concurrent_borrow_two_copies_two_winners(book_stub, loan_stub, member_stub) -> None:
     """With 2 copies and 10 racers, exactly 2 should win.
 
     This is what makes ``FOR UPDATE SKIP LOCKED`` matter: without
@@ -125,15 +125,15 @@ async def test_concurrent_borrow_two_copies_two_winners(library_stub) -> None:
     the first row's lock instead of taking the second copy in parallel.
     """
 
-    book_id = await _create_book(library_stub, copies=2)
+    book_id = await _create_book(book_stub, copies=2)
     member_ids = [
-        await _create_member(library_stub, email=f"m{i}@example.com")
+        await _create_member(member_stub, email=f"m{i}@example.com")
         for i in range(N_BORROWERS)
     ]
 
     coros = [
-        library_stub.BorrowBook(
-            library_pb2.BorrowBookRequest(book_id=book_id, member_id=mid)
+        loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=book_id, member_id=mid)
         )
         for mid in member_ids
     ]

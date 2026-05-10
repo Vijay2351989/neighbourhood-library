@@ -6,11 +6,25 @@
 **Implemented in:** [Phase 3](../phases/phase-3-proto-codegen.md)
 **Used by:** [Phase 4](../phases/phase-4-backend-crud.md), [Phase 5](../phases/phase-5-borrow-return-fines.md), [Phase 6](../phases/phase-6-frontend-mvp.md)
 
-The wire contract between the browser and the backend. Lives at `proto/library/v1/library.proto` (repo root) — a single source of truth for both backend and frontend codegen. We version with `v1` in the package path so future breaking changes are clearly delineated.
+The wire contract between the browser and the backend. Lives in three files under `proto/library/v1/` (repo root) — a single source of truth for both backend and frontend codegen. We version with `v1` in the package path so future breaking changes are clearly delineated.
+
+The 12 RPCs are split across three services (one per subdomain):
+
+| Service | File | RPCs |
+|---|---|---|
+| `library.v1.BookService`   | `book.proto`   | `CreateBook`, `UpdateBook`, `GetBook`, `ListBooks` |
+| `library.v1.MemberService` | `member.proto` | `CreateMember`, `UpdateMember`, `GetMember`, `ListMembers` |
+| `library.v1.LoanService`   | `loan.proto`   | `BorrowBook`, `ReturnBook`, `ListLoans`, `GetMemberLoans` |
+
+All three live under the same `package library.v1`. There is no proto-level dependency between the files — `Loan` references books and members by `int64 id` only, with denormalized `book_title` / `book_author` / `member_name` strings for UI rendering — so each `.proto` compiles independently.
 
 ---
 
-## 1. Full `.proto`
+## 1. Full `.proto` files
+
+Each file below shows its full contents. The Resource message and the RPC messages it serves are co-located with the matching `service` block.
+
+### 1.1 `proto/library/v1/book.proto`
 
 ```protobuf
 syntax = "proto3";
@@ -19,10 +33,6 @@ package library.v1;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/wrappers.proto";
-
-// =====================================================================
-// Resource messages
-// =====================================================================
 
 message Book {
   int64 id = 1;
@@ -35,36 +45,6 @@ message Book {
   google.protobuf.Timestamp created_at = 8;
   google.protobuf.Timestamp updated_at = 9;
 }
-
-message Member {
-  int64 id = 1;
-  string name = 2;
-  string email = 3;
-  google.protobuf.StringValue phone = 4;
-  google.protobuf.StringValue address = 5;
-  google.protobuf.Timestamp created_at = 6;
-  google.protobuf.Timestamp updated_at = 7;
-  int64 outstanding_fines_cents = 8;            // computed: sum of compute_fine_cents over all member's loans (see design/01-database.md §5)
-}
-
-message Loan {
-  int64 id = 1;
-  int64 member_id = 2;
-  int64 book_id = 3;
-  int64 copy_id = 4;
-  string book_title = 5;       // denormalized into responses for UI convenience
-  string book_author = 6;
-  string member_name = 7;
-  google.protobuf.Timestamp borrowed_at = 8;
-  google.protobuf.Timestamp due_at = 9;
-  google.protobuf.Timestamp returned_at = 10;  // unset = active
-  bool overdue = 11;                            // computed: returned_at unset AND due_at < now
-  int64 fine_cents = 12;                        // computed per design/01-database.md §5; 0 when within grace or never overdue
-}
-
-// =====================================================================
-// Book RPCs
-// =====================================================================
 
 message CreateBookRequest {
   string title = 1;
@@ -98,9 +78,34 @@ message ListBooksResponse {
   int32 total_count = 2;
 }
 
-// =====================================================================
-// Member RPCs
-// =====================================================================
+service BookService {
+  rpc CreateBook (CreateBookRequest) returns (CreateBookResponse);
+  rpc UpdateBook (UpdateBookRequest) returns (UpdateBookResponse);
+  rpc GetBook    (GetBookRequest)    returns (GetBookResponse);
+  rpc ListBooks  (ListBooksRequest)  returns (ListBooksResponse);
+}
+```
+
+### 1.2 `proto/library/v1/member.proto`
+
+```protobuf
+syntax = "proto3";
+
+package library.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+message Member {
+  int64 id = 1;
+  string name = 2;
+  string email = 3;
+  google.protobuf.StringValue phone = 4;
+  google.protobuf.StringValue address = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  int64 outstanding_fines_cents = 8;            // computed: sum of compute_fine_cents over all member's loans (see design/01-database.md §5)
+}
 
 message CreateMemberRequest {
   string name = 1;
@@ -132,9 +137,46 @@ message ListMembersResponse {
   int32 total_count = 2;
 }
 
-// =====================================================================
-// Loan (borrow / return / query) RPCs
-// =====================================================================
+service MemberService {
+  rpc CreateMember (CreateMemberRequest) returns (CreateMemberResponse);
+  rpc UpdateMember (UpdateMemberRequest) returns (UpdateMemberResponse);
+  rpc GetMember    (GetMemberRequest)    returns (GetMemberResponse);
+  rpc ListMembers  (ListMembersRequest)  returns (ListMembersResponse);
+}
+```
+
+### 1.3 `proto/library/v1/loan.proto`
+
+```protobuf
+syntax = "proto3";
+
+package library.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+message Loan {
+  int64 id = 1;
+  int64 member_id = 2;
+  int64 book_id = 3;
+  int64 copy_id = 4;
+  string book_title = 5;       // denormalized into responses for UI convenience
+  string book_author = 6;
+  string member_name = 7;
+  google.protobuf.Timestamp borrowed_at = 8;
+  google.protobuf.Timestamp due_at = 9;
+  google.protobuf.Timestamp returned_at = 10;  // unset = active
+  bool overdue = 11;                            // computed: returned_at unset AND due_at < now
+  int64 fine_cents = 12;                        // computed per design/01-database.md §5; 0 when within grace or never overdue
+}
+
+enum LoanFilter {
+  LOAN_FILTER_UNSPECIFIED = 0;  // both active and returned
+  LOAN_FILTER_ACTIVE = 1;       // returned_at IS NULL
+  LOAN_FILTER_RETURNED = 2;
+  LOAN_FILTER_OVERDUE = 3;      // active AND due_at < now
+  LOAN_FILTER_HAS_FINE = 4;     // fine_cents > 0 (active accruing, or returned-late snapshot)
+}
 
 message BorrowBookRequest {
   int64 book_id = 1;
@@ -145,14 +187,6 @@ message BorrowBookResponse { Loan loan = 1; }
 
 message ReturnBookRequest  { int64 loan_id = 1; }
 message ReturnBookResponse { Loan loan = 1; }
-
-enum LoanFilter {
-  LOAN_FILTER_UNSPECIFIED = 0;  // both active and returned
-  LOAN_FILTER_ACTIVE = 1;       // returned_at IS NULL
-  LOAN_FILTER_RETURNED = 2;
-  LOAN_FILTER_OVERDUE = 3;      // active AND due_at < now
-  LOAN_FILTER_HAS_FINE = 4;     // fine_cents > 0 (active accruing, or returned-late snapshot)
-}
 
 message ListLoansRequest {
   google.protobuf.Int64Value member_id = 1;   // optional filter
@@ -174,21 +208,7 @@ message GetMemberLoansResponse {
   repeated Loan loans = 1;
 }
 
-// =====================================================================
-// Service
-// =====================================================================
-
-service LibraryService {
-  rpc CreateBook   (CreateBookRequest)   returns (CreateBookResponse);
-  rpc UpdateBook   (UpdateBookRequest)   returns (UpdateBookResponse);
-  rpc GetBook      (GetBookRequest)      returns (GetBookResponse);
-  rpc ListBooks    (ListBooksRequest)    returns (ListBooksResponse);
-
-  rpc CreateMember (CreateMemberRequest) returns (CreateMemberResponse);
-  rpc UpdateMember (UpdateMemberRequest) returns (UpdateMemberResponse);
-  rpc GetMember    (GetMemberRequest)    returns (GetMemberResponse);
-  rpc ListMembers  (ListMembersRequest)  returns (ListMembersResponse);
-
+service LoanService {
   rpc BorrowBook     (BorrowBookRequest)     returns (BorrowBookResponse);
   rpc ReturnBook     (ReturnBookRequest)     returns (ReturnBookResponse);
   rpc ListLoans      (ListLoansRequest)      returns (ListLoansResponse);

@@ -27,4 +27,15 @@
     <distributed_ddl>
         <path>/clickhouse/task_queue/ddl</path>
     </distributed_ddl>
+    <!--
+        Required by SigNoz's `signoz-telemetrystore-migrator`, which creates
+        ReplicatedReplacingMergeTree tables whose ZK paths reference
+        {shard} and {replica}. Without these macros the bootstrap fails with
+        "No macro 'shard' in config".
+    -->
+    <macros>
+        <shard>01</shard>
+        <replica>signoz-clickhouse</replica>
+        <cluster>cluster</cluster>
+    </macros>
 </clickhouse>

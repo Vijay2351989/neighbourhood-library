@@ -3,8 +3,9 @@
 What the suite needs to run a single test:
 
 * a real Postgres (testcontainer) with the schema migrated by Alembic,
-* an in-process asyncio gRPC server with :class:`LibraryServicer` registered,
-* a gRPC client stub pointed at that server,
+* an in-process asyncio gRPC server with all three business servicers
+  registered (``BookServicer`` / ``MemberServicer`` / ``LoanServicer``),
+* one gRPC stub per service pointed at that server,
 * a clean DB state at the start of each test.
 
 The first three are session-scoped — spinning a fresh container per test
@@ -155,17 +156,22 @@ async def grpc_server(
 ) -> AsyncIterator[tuple[grpc.aio.Server, int]]:
     """Start an in-process asyncio gRPC server bound to a random localhost port.
 
-    Registers the same interceptor stack as production so trace and request
-    context propagate through tests identically to a live deployment.
+    Registers the same interceptor stack as production and all three
+    business servicers — Book, Member, Loan — so trace and request context
+    propagate through tests identically to a live deployment.
     """
 
     from grpc import aio
 
     from library.db.engine import AsyncSessionLocal
-    from library.generated.library.v1 import library_pb2_grpc
+    from library.generated.library.v1 import (
+        book_pb2_grpc,
+        loan_pb2_grpc,
+        member_pb2_grpc,
+    )
     from library.observability.interceptors import RequestContextInterceptor
     from library.observability.setup import grpc_otel_server_interceptor
-    from library.servicer import LibraryServicer
+    from library.servicer import BookServicer, LoanServicer, MemberServicer
 
     server = aio.server(
         interceptors=[
@@ -173,8 +179,14 @@ async def grpc_server(
             RequestContextInterceptor(),
         ]
     )
-    library_pb2_grpc.add_LibraryServiceServicer_to_server(
-        LibraryServicer(AsyncSessionLocal), server
+    book_pb2_grpc.add_BookServiceServicer_to_server(
+        BookServicer(AsyncSessionLocal), server
+    )
+    member_pb2_grpc.add_MemberServiceServicer_to_server(
+        MemberServicer(AsyncSessionLocal), server
+    )
+    loan_pb2_grpc.add_LoanServiceServicer_to_server(
+        LoanServicer(AsyncSessionLocal), server
     )
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
@@ -188,6 +200,9 @@ async def grpc_server(
 async def library_channel(
     grpc_server: tuple[grpc.aio.Server, int],
 ) -> AsyncIterator[grpc.aio.Channel]:
+    """One channel shared by all three stubs — gRPC multiplexes services
+    over a single HTTP/2 connection so there's no benefit to splitting it."""
+
     _, port = grpc_server
     channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
     try:
@@ -197,10 +212,30 @@ async def library_channel(
 
 
 @pytest_asyncio.fixture(scope="session")
-async def library_stub(library_channel: grpc.aio.Channel):
-    from library.generated.library.v1 import library_pb2_grpc
+async def book_stub(library_channel: grpc.aio.Channel):
+    """Stub for ``library.v1.BookService`` — book CRUD."""
 
-    return library_pb2_grpc.LibraryServiceStub(library_channel)
+    from library.generated.library.v1 import book_pb2_grpc
+
+    return book_pb2_grpc.BookServiceStub(library_channel)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def member_stub(library_channel: grpc.aio.Channel):
+    """Stub for ``library.v1.MemberService`` — member CRUD."""
+
+    from library.generated.library.v1 import member_pb2_grpc
+
+    return member_pb2_grpc.MemberServiceStub(library_channel)
+
+
+@pytest_asyncio.fixture(scope="session")
+async def loan_stub(library_channel: grpc.aio.Channel):
+    """Stub for ``library.v1.LoanService`` — borrow / return / list loans."""
+
+    from library.generated.library.v1 import loan_pb2_grpc
+
+    return loan_pb2_grpc.LoanServiceStub(library_channel)
 
 
 # ---- per-test cleanup ----

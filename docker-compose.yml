@@ -2,8 +2,9 @@
 #
 # Brings up the four services described in docs/design/05-infrastructure.md:
 #   postgres  — Postgres 16 with the `library` database.
-#   api       — Python 3.12 gRPC server: 12 LibraryService RPCs plus the
-#               standard health and reflection services.
+#   api       — Python 3.12 gRPC server: 12 RPCs across BookService,
+#               MemberService, and LoanService, plus the standard health
+#               and reflection services.
 #   envoy     — gRPC-Web -> native gRPC translator on :8080, admin on :9901.
 #   web       — Next.js dev server on :3000 (frontend agent owns its Dockerfile).
 #
@@ -94,7 +95,8 @@ services:
     healthcheck:
       # The Phase 1 stub registers the standard grpc.health.v1.Health service,
       # so this probe succeeds as soon as the gRPC server is bound. Per-service
-      # health entries (LibraryService) are added in Phase 4.
+      # health entries (BookService / MemberService / LoanService) get
+      # published once the business servicers are wired in.
       test: ["CMD", "grpc_health_probe", "-addr=127.0.0.1:50051"]
       interval: 10s
       timeout: 5s
@@ -167,18 +169,23 @@ services:
   #
   # SigNoz local backend. Gated behind `profiles: ["observability"]` so
   # `docker compose up` (no profile) does not start any of these services.
-  # See docs/phases/phase-5-5b-observability-backend.md.
   #
-  # Versions are pinned: SigNoz's component matrix evolves quickly and a
-  # mismatch between query-service / frontend / collector / migrator manifests
-  # as confusing schema-init failures. Bump as a coordinated set.
+  # Architecture follows SigNoz's canonical compose layout (as of v0.122.0):
+  #     https://github.com/SigNoz/signoz/blob/main/deploy/docker/docker-compose.yaml
+  #
+  # SigNoz consolidated the previously-separate `query-service` and
+  # `frontend` containers into a single `signoz/signoz` image — the API,
+  # SPA, and query logic now ship together. The four running services are:
+  #
+  #   signoz-zookeeper             — ClickHouse coordination
+  #   signoz-clickhouse            — telemetry storage
+  #   signoz-otel-collector        — OTLP receiver, writes to ClickHouse
+  #   signoz                       — unified API + UI
+  #
+  # Plus a one-shot `signoz-telemetrystore-migrator` that bootstraps the
+  # ClickHouse schemas and exits.
 
   signoz-zookeeper:
-    # Required by ClickHouse for ON CLUSTER DDL the SigNoz schema migrator
-    # issues. Even though we run a single-node ClickHouse, the migrator's
-    # cluster-aware migrations need a coordinator. Apache's official image
-    # is used here (Bitnami's free public images moved off Docker Hub in
-    # late 2025).
     profiles: ["observability"]
     image: zookeeper:3.7
     environment:
@@ -192,6 +199,16 @@ services:
   signoz-clickhouse:
     profiles: ["observability"]
     image: clickhouse/clickhouse-server:25.8-alpine
+    # The unified `signoz` server's opamp config-server pushes a collector
+    # config that references hostname `clickhouse:9000` (SigNoz's upstream
+    # default). Our service is named `signoz-clickhouse` for clarity, so we
+    # also publish a `clickhouse` alias on the default network — without it
+    # the otel-collector loops on "lookup clickhouse: no such host" and no
+    # spans land in ClickHouse.
+    networks:
+      default:
+        aliases:
+          - clickhouse
     volumes:
       - signoz-clickhouse:/var/lib/clickhouse
       - ./deploy/signoz/clickhouse-users.xml:/etc/clickhouse-server/users.d/library.xml:ro
@@ -199,8 +216,6 @@ services:
     depends_on:
       - signoz-zookeeper
     healthcheck:
-      # Alpine images don't ship wget; use clickhouse-client which is always
-      # present on the server image.
       test: ["CMD", "clickhouse-client", "--query=SELECT 1"]
       interval: 10s
       timeout: 5s
@@ -208,85 +223,93 @@ services:
       start_period: 30s
     restart: on-failure
 
-  signoz-otel-collector-migrator:
-    # One-shot: creates the signoz_traces / signoz_logs / signoz_metrics
-    # schemas in ClickHouse, then exits. Both query-service and the collector
-    # depend on this completing successfully.
+  signoz-telemetrystore-migrator:
+    # One-shot: bootstraps the ClickHouse schemas (signoz_traces / signoz_logs /
+    # signoz_metrics / signoz_meter) then exits. Same image as the collector,
+    # different command. Replaces the deprecated `signoz/signoz-schema-migrator`.
     profiles: ["observability"]
-    image: signoz/signoz-schema-migrator:v0.144.4
+    image: signoz/signoz-otel-collector:v0.144.4
+    entrypoint: ["/bin/sh"]
     command:
-      - "sync"
-      - "--dsn=tcp://signoz-clickhouse:9000"
-      - "--up="
+      - "-c"
+      - |
+        /signoz-otel-collector migrate bootstrap &&
+        /signoz-otel-collector migrate sync up &&
+        /signoz-otel-collector migrate async up
+    environment:
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://signoz-clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
     depends_on:
       signoz-clickhouse:
         condition: service_healthy
     restart: on-failure
 
   signoz-otel-collector:
+    # Receives OTLP traces/logs from the api on :4317 (gRPC) / :4318 (HTTP)
+    # and writes to ClickHouse. The first command is a "schema is migrated?"
+    # check that fails fast if telemetrystore-migrator hasn't completed.
     profiles: ["observability"]
     image: signoz/signoz-otel-collector:v0.144.4
-    # The collector binary fails fast if it can't resolve signoz-clickhouse
-    # at startup — under Docker Desktop on macOS the embedded DNS can take a
-    # few seconds longer than the depends_on healthchecks suggest. Wrap the
-    # entrypoint with a tiny retry-until-resolvable shim so the first DNS
-    # lookup is the one that actually succeeds.
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["/bin/sh"]
     command:
+      - "-c"
       - |
-        until getent hosts signoz-clickhouse >/dev/null 2>&1; do
-          echo "collector: waiting for signoz-clickhouse DNS..."
-          sleep 2
-        done
-        exec /signoz-otel-collector --config=/etc/otel-collector-config.yaml
+        /signoz-otel-collector migrate sync check &&
+        /signoz-otel-collector \
+          --config=/etc/otel-collector-config.yaml \
+          --manager-config=/etc/manager-config.yaml \
+          --copy-path=/var/tmp/collector-config.yaml
     volumes:
-      - ./deploy/signoz/collector.yaml:/etc/otel-collector-config.yaml:ro
+      - ./deploy/signoz/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+      - ./deploy/signoz/otel-collector-opamp-config.yaml:/etc/manager-config.yaml:ro
     environment:
+      OTEL_RESOURCE_ATTRIBUTES: host.name=signoz-host,os.type=linux
       LOW_CARDINAL_EXCEPTION_GROUPING: "false"
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN: tcp://signoz-clickhouse:9000
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_CLUSTER: cluster
+      SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_REPLICATION: "true"
+      SIGNOZ_OTEL_COLLECTOR_TIMEOUT: 10m
     ports:
       - "4317:4317"   # OTLP gRPC — what the api exports to
-      - "4318:4318"   # OTLP HTTP — for browser-side OTel in Phase 6
+      - "4318:4318"   # OTLP HTTP
     depends_on:
       signoz-clickhouse:
         condition: service_healthy
-      signoz-otel-collector-migrator:
+      signoz-telemetrystore-migrator:
         condition: service_completed_successfully
     restart: on-failure
 
-  signoz-query-service:
+  signoz:
+    # The unified SigNoz image. Exposes the SPA + API on internal :8080.
+    # We map host :3301 for compat with prior docs; the UI is at
+    # http://localhost:3301 once healthy.
+    #
+    # SQLite (auth, dashboards, alerts, prefs) is in /var/lib/signoz/.
+    # Telemetry data lives in ClickHouse.
     profiles: ["observability"]
-    image: signoz/query-service:0.76.2-oss
-    command: ["-config=/root/config/prometheus.yml"]
-    environment:
-      ClickHouseUrl: tcp://signoz-clickhouse:9000
-      STORAGE: clickhouse
-      SIGNOZ_LOCAL_DB_PATH: /var/lib/signoz/signoz.db
+    image: signoz/signoz:v0.122.0
+    ports:
+      - "3301:8080"
     volumes:
       - signoz-data:/var/lib/signoz/
-      - ./deploy/signoz/prometheus.yml:/root/config/prometheus.yml:ro
+    environment:
+      SIGNOZ_ALERTMANAGER_PROVIDER: signoz
+      SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN: tcp://signoz-clickhouse:9000
+      SIGNOZ_SQLSTORE_SQLITE_PATH: /var/lib/signoz/signoz.db
+      SIGNOZ_TOKENIZER_JWT_SECRET: secret
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/v1/health"]
-      interval: 10s
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8080/api/v1/health"]
+      interval: 30s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 30s
     depends_on:
       signoz-clickhouse:
         condition: service_healthy
-      signoz-otel-collector-migrator:
+      signoz-telemetrystore-migrator:
         condition: service_completed_successfully
-    restart: on-failure
-
-  signoz-frontend:
-    profiles: ["observability"]
-    image: signoz/frontend:0.76.0-0e721dee1
-    environment:
-      FRONTEND_API_ENDPOINT: http://signoz-query-service:8080
-    ports:
-      - "3301:3301"
-    depends_on:
-      signoz-query-service:
-        condition: service_healthy
     restart: on-failure
 
 volumes:

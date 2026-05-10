@@ -1,13 +1,14 @@
 """Entry point for the Neighborhood Library gRPC server.
 
-Phase 4 scope: register the :class:`LibraryServicer` (the eight book/member
-RPCs) alongside the standard ``grpc.health.v1.Health`` service. The health
-service's per-service entry for ``library.v1.LibraryService`` is set to
-``SERVING`` once the servicer is wired in, satisfying the spec's requirement
-that the api healthcheck pass once the business RPCs are live.
+Registers three business servicers — ``BookService``, ``MemberService``,
+``LoanService`` (the proto split landed after Phase 4 broke up the original
+unified ``LibraryService``) — alongside the standard ``grpc.health.v1.Health``
+service. The health service publishes a per-service entry for each so probes
+can target an individual subdomain, and an empty-string overall entry so
+``grpc_health_probe`` works with its default arguments.
 
 Graceful shutdown: SIGINT / SIGTERM trigger ``server.stop(grace)`` so in-flight
-RPCs get a chance to finish. The health service is flipped to ``NOT_SERVING``
+RPCs get a chance to finish. All health entries are flipped to ``NOT_SERVING``
 before stopping so load balancers see us drain cleanly.
 """
 
@@ -24,14 +25,21 @@ from grpc_reflection.v1alpha import reflection
 
 from library.config import get_settings
 from library.db.engine import AsyncSessionLocal
-from library.generated.library.v1 import library_pb2, library_pb2_grpc
+from library.generated.library.v1 import (
+    book_pb2,
+    book_pb2_grpc,
+    loan_pb2,
+    loan_pb2_grpc,
+    member_pb2,
+    member_pb2_grpc,
+)
 from library.observability.interceptors import RequestContextInterceptor
 from library.observability.setup import (
     TelemetryHandles,
     grpc_otel_server_interceptor,
     init_telemetry,
 )
-from library.servicer import LibraryServicer
+from library.servicer import BookServicer, LoanServicer, MemberServicer
 
 logger = logging.getLogger("library.main")
 
@@ -39,11 +47,21 @@ logger = logging.getLogger("library.main")
 # health-checking protocol. ``grpc_health_probe`` defaults to this.
 _OVERALL_HEALTH_SERVICE: Final[str] = ""
 
-# Per-service health entry name. Frontend / Envoy can probe this specifically
-# to know whether the business surface is up, distinct from the overall
-# server-up signal above.
-_LIBRARY_SERVICE_NAME: Final[str] = (
-    library_pb2.DESCRIPTOR.services_by_name["LibraryService"].full_name
+# Per-service health entry names. Frontend / Envoy can probe a specific
+# subdomain (e.g. only LoanService) without flipping the others.
+_BOOK_SERVICE_NAME: Final[str] = (
+    book_pb2.DESCRIPTOR.services_by_name["BookService"].full_name
+)
+_MEMBER_SERVICE_NAME: Final[str] = (
+    member_pb2.DESCRIPTOR.services_by_name["MemberService"].full_name
+)
+_LOAN_SERVICE_NAME: Final[str] = (
+    loan_pb2.DESCRIPTOR.services_by_name["LoanService"].full_name
+)
+_BUSINESS_SERVICE_NAMES: Final[tuple[str, ...]] = (
+    _BOOK_SERVICE_NAME,
+    _MEMBER_SERVICE_NAME,
+    _LOAN_SERVICE_NAME,
 )
 
 # Seconds to let in-flight RPCs finish during shutdown before forcing close.
@@ -51,7 +69,8 @@ _SHUTDOWN_GRACE_SECONDS: Final[float] = 5.0
 
 
 def _build_server() -> tuple[aio.Server, health.HealthServicer]:
-    """Construct the asyncio gRPC server with health, reflection, and LibraryService.
+    """Construct the asyncio gRPC server with health, reflection, and the
+    three business servicers.
 
     Returns the server and the health servicer so the caller can flip status
     during shutdown. The interceptor order matters: the OTel server
@@ -68,23 +87,33 @@ def _build_server() -> tuple[aio.Server, health.HealthServicer]:
     health_servicer = health.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
-    # Register the business servicer. AsyncSessionLocal is the lazy proxy
-    # built in db/engine.py; the engine isn't actually opened until the first
-    # session is taken, which lets ``alembic upgrade head`` finish first via
-    # entrypoint.sh.
-    library_servicer = LibraryServicer(AsyncSessionLocal)
-    library_pb2_grpc.add_LibraryServiceServicer_to_server(library_servicer, server)
+    # Register the three business servicers. AsyncSessionLocal is the lazy
+    # proxy built in db/engine.py; the engine isn't actually opened until the
+    # first session is taken, which lets ``alembic upgrade head`` finish
+    # first via entrypoint.sh. Settings is resolved per-servicer so each can
+    # be passed an override in tests.
+    settings = get_settings()
+    book_pb2_grpc.add_BookServiceServicer_to_server(
+        BookServicer(AsyncSessionLocal), server
+    )
+    member_pb2_grpc.add_MemberServiceServicer_to_server(
+        MemberServicer(AsyncSessionLocal, settings), server
+    )
+    loan_pb2_grpc.add_LoanServiceServicer_to_server(
+        LoanServicer(AsyncSessionLocal, settings), server
+    )
 
-    # Mark both health entries as SERVING.
+    # Mark the overall entry and every per-service entry as SERVING.
     health_servicer.set(_OVERALL_HEALTH_SERVICE, health_pb2.HealthCheckResponse.SERVING)
-    health_servicer.set(_LIBRARY_SERVICE_NAME, health_pb2.HealthCheckResponse.SERVING)
+    for name in _BUSINESS_SERVICE_NAMES:
+        health_servicer.set(name, health_pb2.HealthCheckResponse.SERVING)
 
     # Server reflection lets tools like grpcurl discover services without a
     # local copy of the .proto. Useful for dev / debugging; cheap to ship.
     reflection.enable_server_reflection(
         (
             health_pb2.DESCRIPTOR.services_by_name["Health"].full_name,
-            _LIBRARY_SERVICE_NAME,
+            *_BUSINESS_SERVICE_NAMES,
             reflection.SERVICE_NAME,
         ),
         server,
@@ -133,10 +162,8 @@ async def _serve() -> None:
             _OVERALL_HEALTH_SERVICE,
             health_pb2.HealthCheckResponse.NOT_SERVING,
         )
-        health_servicer.set(
-            _LIBRARY_SERVICE_NAME,
-            health_pb2.HealthCheckResponse.NOT_SERVING,
-        )
+        for name in _BUSINESS_SERVICE_NAMES:
+            health_servicer.set(name, health_pb2.HealthCheckResponse.NOT_SERVING)
         await server.stop(_SHUTDOWN_GRACE_SECONDS)
         # Flush any pending OTLP batches (no-op when the console exporter is
         # active; matters when traces/logs are shipped out-of-process).

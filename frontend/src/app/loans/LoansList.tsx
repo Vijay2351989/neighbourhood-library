@@ -4,9 +4,9 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { client } from "@/lib/client";
+import { loanClient } from "@/lib/client";
 import { loanKeys } from "@/lib/queryKeys";
-import { LoanFilter } from "@/generated/library/v1/library_pb";
+import { LoanFilter } from "@/generated/library/v1/loan_pb";
 import { Button } from "@/components/ui/Button";
 import { ChipFilter } from "@/components/ui/Tabs";
 import { PageHeader } from "@/components/PageHeader";
@@ -67,7 +67,7 @@ export function LoansList() {
       pageSize: PAGE_SIZE,
     }),
     queryFn: () =>
-      client.listLoans({
+      loanClient.listLoans({
         filter: FILTER_TO_PROTO[filter],
         offset,
         pageSize: PAGE_SIZE,

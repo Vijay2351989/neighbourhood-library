@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { client } from "@/lib/client";
+import { bookClient, loanClient, memberClient } from "@/lib/client";
 import { bookKeys, loanKeys, memberKeys } from "@/lib/queryKeys";
-import { LoanFilter } from "@/generated/library/v1/library_pb";
+import { LoanFilter } from "@/generated/library/v1/loan_pb";
 import { formatCents, formatDate } from "@/lib/format";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { PageHeader } from "@/components/PageHeader";
@@ -19,30 +19,30 @@ export default function DashboardPage() {
 
   const booksQ = useQuery({
     queryKey: bookKeys.list({ pageSize: 1 }),
-    queryFn: () => client.listBooks({ pageSize: 1 }),
+    queryFn: () => bookClient.listBooks({ pageSize: 1 }),
   });
   const membersQ = useQuery({
     queryKey: memberKeys.list({ pageSize: 1 }),
-    queryFn: () => client.listMembers({ pageSize: 1 }),
+    queryFn: () => memberClient.listMembers({ pageSize: 1 }),
   });
   const activeQ = useQuery({
     queryKey: loanKeys.list({ filter: LoanFilter.ACTIVE, pageSize: 1 }),
     queryFn: () =>
-      client.listLoans({ filter: LoanFilter.ACTIVE, pageSize: 1 }),
+      loanClient.listLoans({ filter: LoanFilter.ACTIVE, pageSize: 1 }),
   });
   const overdueQ = useQuery({
     queryKey: loanKeys.list({ filter: LoanFilter.OVERDUE, pageSize: 1 }),
     queryFn: () =>
-      client.listLoans({ filter: LoanFilter.OVERDUE, pageSize: 1 }),
+      loanClient.listLoans({ filter: LoanFilter.OVERDUE, pageSize: 1 }),
   });
   const finedQ = useQuery({
     queryKey: loanKeys.list({ filter: LoanFilter.HAS_FINE, pageSize: 100 }),
     queryFn: () =>
-      client.listLoans({ filter: LoanFilter.HAS_FINE, pageSize: 100 }),
+      loanClient.listLoans({ filter: LoanFilter.HAS_FINE, pageSize: 100 }),
   });
   const recentQ = useQuery({
     queryKey: loanKeys.list({ pageSize: 10 }),
-    queryFn: () => client.listLoans({ pageSize: 10 }),
+    queryFn: () => loanClient.listLoans({ pageSize: 10 }),
   });
 
   // Aggregate fine total client-side. Backend doesn't yet expose a sum-fines

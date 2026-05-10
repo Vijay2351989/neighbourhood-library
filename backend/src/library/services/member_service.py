@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from library.config import Settings
 from library.db.models import Member
 from library.errors import InvalidArgument
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import member_pb2
 from library.repositories import loans as loans_repo
 from library.repositories import members as members_repo
 from library.repositories.loans import FineConfig
@@ -49,8 +49,8 @@ class MemberService:
 
     @with_retry(RETRY_WRITE_TX)
     async def create_member(
-        self, request: library_pb2.CreateMemberRequest
-    ) -> library_pb2.CreateMemberResponse:
+        self, request: member_pb2.CreateMemberRequest
+    ) -> member_pb2.CreateMemberResponse:
         name = request.name.strip()
         email = request.email.strip()
         if not name:
@@ -79,12 +79,12 @@ class MemberService:
                 "member.created", attributes={"library.member_id": member.id}
             )
 
-        return library_pb2.CreateMemberResponse(member=member_proto)
+        return member_pb2.CreateMemberResponse(member=member_proto)
 
     @with_retry(RETRY_WRITE_TX)
     async def update_member(
-        self, request: library_pb2.UpdateMemberRequest
-    ) -> library_pb2.UpdateMemberResponse:
+        self, request: member_pb2.UpdateMemberRequest
+    ) -> member_pb2.UpdateMemberResponse:
         if request.id <= 0:
             raise InvalidArgument("id is required")
         name = request.name.strip()
@@ -117,14 +117,14 @@ class MemberService:
                 "member.updated", attributes={"library.member_id": member.id}
             )
 
-        return library_pb2.UpdateMemberResponse(member=member_proto)
+        return member_pb2.UpdateMemberResponse(member=member_proto)
 
     # ---------- reads ----------
 
     @with_retry(RETRY_READ)
     async def get_member(
-        self, request: library_pb2.GetMemberRequest
-    ) -> library_pb2.GetMemberResponse:
+        self, request: member_pb2.GetMemberRequest
+    ) -> member_pb2.GetMemberResponse:
         if request.id <= 0:
             raise InvalidArgument("id is required")
 
@@ -160,12 +160,12 @@ class MemberService:
                 },
             )
 
-        return library_pb2.GetMemberResponse(member=member_proto)
+        return member_pb2.GetMemberResponse(member=member_proto)
 
     @with_retry(RETRY_READ)
     async def list_members(
-        self, request: library_pb2.ListMembersRequest
-    ) -> library_pb2.ListMembersResponse:
+        self, request: member_pb2.ListMembersRequest
+    ) -> member_pb2.ListMembersResponse:
         page_size, offset = clamp_pagination(
             page_size=request.page_size,
             offset=request.offset,
@@ -186,14 +186,14 @@ class MemberService:
         # per-row aggregate query for every result page would multiply the
         # query count and the dashboard's "total outstanding fines" tile
         # is system-wide rather than per-row anyway.
-        return library_pb2.ListMembersResponse(
+        return member_pb2.ListMembersResponse(
             members=[_member_to_proto(m, outstanding_fines_cents=0) for m in result.rows],
             total_count=result.total_count,
         )
 
 
-def _member_to_proto(member: Member, *, outstanding_fines_cents: int) -> library_pb2.Member:
-    proto = library_pb2.Member(
+def _member_to_proto(member: Member, *, outstanding_fines_cents: int) -> member_pb2.Member:
+    proto = member_pb2.Member(
         id=member.id,
         name=member.name,
         email=member.email,

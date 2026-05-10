@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { loanClient } from "@/lib/client";
 import { bookKeys, loanKeys, memberKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/Button";
 import { Dialog } from "@/components/ui/Dialog";
@@ -30,7 +30,7 @@ export function ReturnButton({
   const qc = useQueryClient();
 
   const mutation = useMutation({
-    mutationFn: () => client.returnBook({ loanId }),
+    mutationFn: () => loanClient.returnBook({ loanId }),
     onSuccess: () => {
       toast.success("Returned.");
       qc.invalidateQueries({ queryKey: loanKeys.lists() });

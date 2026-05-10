@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+// Lending lifecycle service: borrow, return, list-by-filter, per-member loans.
+// References books and members by id only — no proto-level dependency on
+// book.proto / member.proto. The denormalized `book_title`, `book_author`,
+// and `member_name` fields are populated server-side at response time so
+// the UI can render a loan row without a follow-up RPC.
+package library.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+// =====================================================================
+// Resource
+// =====================================================================
+
+message Loan {
+  int64 id = 1;
+  int64 member_id = 2;
+  int64 book_id = 3;
+  int64 copy_id = 4;
+  string book_title = 5;       // denormalized into responses for UI convenience
+  string book_author = 6;
+  string member_name = 7;
+  google.protobuf.Timestamp borrowed_at = 8;
+  google.protobuf.Timestamp due_at = 9;
+  google.protobuf.Timestamp returned_at = 10;  // unset = active
+  bool overdue = 11;                            // computed: returned_at unset AND due_at < now
+  int64 fine_cents = 12;                        // computed per design/01-database.md §5; 0 when within grace or never overdue
+}
+
+enum LoanFilter {
+  LOAN_FILTER_UNSPECIFIED = 0;  // both active and returned
+  LOAN_FILTER_ACTIVE = 1;       // returned_at IS NULL
+  LOAN_FILTER_RETURNED = 2;
+  LOAN_FILTER_OVERDUE = 3;      // active AND due_at < now
+  LOAN_FILTER_HAS_FINE = 4;     // fine_cents > 0 (active accruing, or returned-late snapshot)
+}
+
+// =====================================================================
+// RPC messages
+// =====================================================================
+
+message BorrowBookRequest {
+  int64 book_id = 1;
+  int64 member_id = 2;
+  google.protobuf.Timestamp due_at = 3;   // optional; server defaults to now+14d
+}
+message BorrowBookResponse { Loan loan = 1; }
+
+message ReturnBookRequest  { int64 loan_id = 1; }
+message ReturnBookResponse { Loan loan = 1; }
+
+message ListLoansRequest {
+  google.protobuf.Int64Value member_id = 1;   // optional filter
+  google.protobuf.Int64Value book_id = 2;     // optional filter
+  LoanFilter filter = 3;
+  int32 page_size = 4;
+  int32 offset = 5;
+}
+message ListLoansResponse {
+  repeated Loan loans = 1;
+  int32 total_count = 2;
+}
+
+message GetMemberLoansRequest {
+  int64 member_id = 1;
+  LoanFilter filter = 2;
+}
+message GetMemberLoansResponse {
+  repeated Loan loans = 1;
+}
+
+// =====================================================================
+// Service
+// =====================================================================
+
+service LoanService {
+  rpc BorrowBook     (BorrowBookRequest)     returns (BorrowBookResponse);
+  rpc ReturnBook     (ReturnBookRequest)     returns (ReturnBookResponse);
+  rpc ListLoans      (ListLoansRequest)      returns (ListLoansResponse);
+  rpc GetMemberLoans (GetMemberLoansRequest) returns (GetMemberLoansResponse);
+}

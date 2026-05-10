@@ -4,9 +4,9 @@ import Link from "next/link";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { loanClient, memberClient } from "@/lib/client";
 import { memberKeys } from "@/lib/queryKeys";
-import { LoanFilter } from "@/generated/library/v1/library_pb";
+import { LoanFilter } from "@/generated/library/v1/loan_pb";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { PageHeader } from "@/components/PageHeader";
@@ -38,7 +38,7 @@ export function MemberDetail({ id }: { id: string }) {
 
   const memberQ = useQuery({
     queryKey: memberKeys.detail(id),
-    queryFn: () => client.getMember({ id: BigInt(id) }),
+    queryFn: () => memberClient.getMember({ id: BigInt(id) }),
     retry: (count, err) =>
       toFriendlyError(err).code === Code.NotFound ? false : count < 1,
   });
@@ -46,7 +46,7 @@ export function MemberDetail({ id }: { id: string }) {
   const loansQ = useQuery({
     queryKey: memberKeys.loans(id, FILTER_FOR[tab]),
     queryFn: () =>
-      client.getMemberLoans({
+      loanClient.getMemberLoans({
         memberId: BigInt(id),
         filter: FILTER_FOR[tab],
       }),

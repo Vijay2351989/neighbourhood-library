@@ -12,7 +12,7 @@ from opentelemetry import trace
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from library.errors import FailedPrecondition, InvalidArgument
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import book_pb2
 from library.repositories import books as books_repo
 from library.resilience import RETRY_READ, RETRY_WRITE_TX, with_retry
 from library.services.conversions import (
@@ -38,8 +38,8 @@ class BookService:
 
     @with_retry(RETRY_WRITE_TX)
     async def create_book(
-        self, request: library_pb2.CreateBookRequest
-    ) -> library_pb2.CreateBookResponse:
+        self, request: book_pb2.CreateBookRequest
+    ) -> book_pb2.CreateBookResponse:
         title = request.title.strip()
         author = request.author.strip()
         if not title:
@@ -75,12 +75,12 @@ class BookService:
                 },
             )
 
-        return library_pb2.CreateBookResponse(book=book_proto)
+        return book_pb2.CreateBookResponse(book=book_proto)
 
     @with_retry(RETRY_WRITE_TX)
     async def update_book(
-        self, request: library_pb2.UpdateBookRequest
-    ) -> library_pb2.UpdateBookResponse:
+        self, request: book_pb2.UpdateBookRequest
+    ) -> book_pb2.UpdateBookResponse:
         if request.id <= 0:
             raise InvalidArgument("id is required")
         title = request.title.strip()
@@ -148,14 +148,14 @@ class BookService:
                 )
             book_proto = _book_row_to_proto(row)
 
-        return library_pb2.UpdateBookResponse(book=book_proto)
+        return book_pb2.UpdateBookResponse(book=book_proto)
 
     # ---------- reads ----------
 
     @with_retry(RETRY_READ)
     async def get_book(
-        self, request: library_pb2.GetBookRequest
-    ) -> library_pb2.GetBookResponse:
+        self, request: book_pb2.GetBookRequest
+    ) -> book_pb2.GetBookResponse:
         if request.id <= 0:
             raise InvalidArgument("id is required")
 
@@ -163,12 +163,12 @@ class BookService:
             row = await books_repo.get(session, request.id)
             book_proto = _book_row_to_proto(row)
 
-        return library_pb2.GetBookResponse(book=book_proto)
+        return book_pb2.GetBookResponse(book=book_proto)
 
     @with_retry(RETRY_READ)
     async def list_books(
-        self, request: library_pb2.ListBooksRequest
-    ) -> library_pb2.ListBooksResponse:
+        self, request: book_pb2.ListBooksRequest
+    ) -> book_pb2.ListBooksResponse:
         page_size, offset = clamp_pagination(
             page_size=request.page_size,
             offset=request.offset,
@@ -185,17 +185,17 @@ class BookService:
                 offset=offset,
             )
 
-        return library_pb2.ListBooksResponse(
+        return book_pb2.ListBooksResponse(
             books=[_book_row_to_proto(row) for row in result.rows],
             total_count=result.total_count,
         )
 
 
-def _book_row_to_proto(row: books_repo.BookRow) -> library_pb2.Book:
+def _book_row_to_proto(row: books_repo.BookRow) -> book_pb2.Book:
     """Translate a repository BookRow into the wire proto Book message."""
 
     book = row.book
-    proto = library_pb2.Book(
+    proto = book_pb2.Book(
         id=book.id,
         title=book.title,
         author=book.author,

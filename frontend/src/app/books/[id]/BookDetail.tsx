@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { bookClient } from "@/lib/client";
 import { bookKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -16,7 +16,7 @@ import { toFriendlyError } from "@/lib/errors";
 export function BookDetail({ id }: { id: string }) {
   const { data, isLoading, error } = useQuery({
     queryKey: bookKeys.detail(id),
-    queryFn: () => client.getBook({ id: BigInt(id) }),
+    queryFn: () => bookClient.getBook({ id: BigInt(id) }),
     retry: (count, err) => {
       const f = toFriendlyError(err);
       // Don't retry NOT_FOUND.

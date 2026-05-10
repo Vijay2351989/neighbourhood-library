@@ -208,6 +208,8 @@ docker compose --env-file .env.observability --profile observability up -d
 
 That file flips `OTEL_TRACES_EXPORTER=otlp` and points `OTEL_EXPORTER_OTLP_ENDPOINT` at the in-network `signoz-otel-collector:4317`. See `deploy.md` for the SigNoz topology.
 
+> **First time on a machine, you also have to create the SigNoz admin account.** Open http://localhost:3301 after the stack is up — the UI auto-redirects to `/signup` because the SigNoz user DB starts empty. Fill in name / org name / email / password; that account becomes the local admin. Walkthrough and reset steps in [`deploy.md` §8 "First-time signup"](./deploy.md#first-time-signup-creating-the-signoz-admin).
+
 ---
 
 ## 8. Frontend

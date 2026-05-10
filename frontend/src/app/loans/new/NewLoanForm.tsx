@@ -5,9 +5,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { bookClient, loanClient, memberClient } from "@/lib/client";
 import { bookKeys, loanKeys, memberKeys } from "@/lib/queryKeys";
-import type { Book, Member } from "@/generated/library/v1/library_pb";
+import type { Book } from "@/generated/library/v1/book_pb";
+import type { Member } from "@/generated/library/v1/member_pb";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
@@ -35,7 +36,7 @@ export function NewLoanForm() {
   useEffect(() => {
     const memberId = sp.get("memberId");
     if (memberId) {
-      client
+      memberClient
         .getMember({ id: BigInt(memberId) })
         .then((r) => r.member && setMember(r.member))
         .catch(() => {
@@ -48,7 +49,7 @@ export function NewLoanForm() {
   const mutation = useMutation({
     mutationFn: () => {
       if (!member || !book) throw new Error("Member and book are required.");
-      return client.borrowBook({
+      return loanClient.borrowBook({
         memberId: member.id,
         bookId: book.id,
         dueAt: dateInputToTimestamp(dueDate),
@@ -105,7 +106,7 @@ export function NewLoanForm() {
                 </>
               )}
               search={async (q) => {
-                const r = await client.listMembers({
+                const r = await memberClient.listMembers({
                   search: q || undefined,
                   pageSize: 10,
                 });
@@ -129,7 +130,7 @@ export function NewLoanForm() {
                 </>
               )}
               search={async (q) => {
-                const r = await client.listBooks({
+                const r = await bookClient.listBooks({
                   search: q || undefined,
                   pageSize: 10,
                 });

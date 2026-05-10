@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+// Book catalog service. Pairs with member.proto (members) and loan.proto
+// (lending lifecycle). All three live in package `library.v1` so wire-format
+// compatibility is preserved if a single channel multiplexes them.
+package library.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/wrappers.proto";
+
+// =====================================================================
+// Resource
+// =====================================================================
+
+message Book {
+  int64 id = 1;
+  string title = 2;
+  string author = 3;
+  google.protobuf.StringValue isbn = 4;            // nullable
+  google.protobuf.Int32Value published_year = 5;   // nullable
+  int32 total_copies = 6;                           // computed
+  int32 available_copies = 7;                       // computed
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// =====================================================================
+// RPC messages
+// =====================================================================
+
+message CreateBookRequest {
+  string title = 1;
+  string author = 2;
+  google.protobuf.StringValue isbn = 3;
+  google.protobuf.Int32Value published_year = 4;
+  int32 number_of_copies = 5;   // must be >= 1
+}
+message CreateBookResponse { Book book = 1; }
+
+message UpdateBookRequest {
+  int64 id = 1;
+  string title = 2;
+  string author = 3;
+  google.protobuf.StringValue isbn = 4;
+  google.protobuf.Int32Value published_year = 5;
+  google.protobuf.Int32Value number_of_copies = 6;  // optional; if set, server reconciles copy rows
+}
+message UpdateBookResponse { Book book = 1; }
+
+message GetBookRequest  { int64 id = 1; }
+message GetBookResponse { Book book = 1; }
+
+message ListBooksRequest {
+  google.protobuf.StringValue search = 1;   // matches title or author, case-insensitive
+  int32 page_size = 2;                       // default 25, max 100
+  int32 offset = 3;
+}
+message ListBooksResponse {
+  repeated Book books = 1;
+  int32 total_count = 2;
+}
+
+// =====================================================================
+// Service
+// =====================================================================
+
+service BookService {
+  rpc CreateBook (CreateBookRequest) returns (CreateBookResponse);
+  rpc UpdateBook (UpdateBookRequest) returns (UpdateBookResponse);
+  rpc GetBook    (GetBookRequest)    returns (GetBookResponse);
+  rpc ListBooks  (ListBooksRequest)  returns (ListBooksResponse);
+}

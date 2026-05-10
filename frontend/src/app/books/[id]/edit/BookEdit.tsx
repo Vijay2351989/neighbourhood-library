@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { bookClient } from "@/lib/client";
 import { bookKeys } from "@/lib/queryKeys";
 import { BookForm } from "@/components/BookForm";
 import type { BookFormValues } from "@/components/BookForm";
@@ -31,12 +31,12 @@ export function BookEdit({ id }: { id: string }) {
 
   const bookQ = useQuery({
     queryKey: bookKeys.detail(id),
-    queryFn: () => client.getBook({ id: BigInt(id) }),
+    queryFn: () => bookClient.getBook({ id: BigInt(id) }),
   });
 
   const mutation = useMutation({
     mutationFn: (v: BookFormValues) =>
-      client.updateBook({
+      bookClient.updateBook({
         id: BigInt(id),
         title: v.title.trim(),
         author: v.author.trim(),

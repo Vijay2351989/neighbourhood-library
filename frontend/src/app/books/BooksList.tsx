@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { client } from "@/lib/client";
+import { bookClient } from "@/lib/client";
 import { bookKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -63,7 +63,7 @@ export function BooksList() {
   const { data, isLoading, error } = useQuery({
     queryKey: bookKeys.list(queryParams),
     queryFn: () =>
-      client.listBooks({
+      bookClient.listBooks({
         search: search || undefined,
         offset,
         pageSize: PAGE_SIZE,

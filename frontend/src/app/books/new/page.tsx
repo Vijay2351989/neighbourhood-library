@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { client } from "@/lib/client";
+import { bookClient } from "@/lib/client";
 import { bookKeys } from "@/lib/queryKeys";
 import { BookForm } from "@/components/BookForm";
 import type { BookFormValues } from "@/components/BookForm";
@@ -25,7 +25,7 @@ export default function NewBookPage() {
 
   const mutation = useMutation({
     mutationFn: (v: BookFormValues) =>
-      client.createBook({
+      bookClient.createBook({
         title: v.title.trim(),
         author: v.author.trim(),
         isbn: v.isbn.trim() ? v.isbn.trim() : undefined,

@@ -2,7 +2,7 @@
 // place means cache invalidation after a mutation can never silently miss a
 // matching list query.
 
-import type { LoanFilter } from "@/generated/library/v1/library_pb";
+import type { LoanFilter } from "@/generated/library/v1/loan_pb";
 
 export const bookKeys = {
   all: ["books"] as const,

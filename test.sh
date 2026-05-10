@@ -295,8 +295,12 @@ if [ "$RUN_E2E" = "1" ]; then
             npm install --silent
         fi
         npx playwright install --with-deps chromium 2>/dev/null || npx playwright install chromium
+        # Bash 3.2 (macOS default) raises "unbound variable" under `set -u`
+        # when expanding an empty array as `${arr[@]}`. The `${var+...}` form
+        # only expands when the array has at least one element, which is the
+        # portable workaround.
         PLAYWRIGHT_BASE_URL="http://localhost:$TEST_WEB_HOST_PORT" \
-            npx playwright test "${PLAYWRIGHT_EXTRA_ARGS[@]}"
+            npx playwright test ${PLAYWRIGHT_EXTRA_ARGS[@]+"${PLAYWRIGHT_EXTRA_ARGS[@]}"}
     )
     ok "Playwright happy-path passed"
 fi

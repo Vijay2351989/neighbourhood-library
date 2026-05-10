@@ -38,7 +38,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import book_pb2, loan_pb2, member_pb2
 
 
 # ---------- fixtures ----------
@@ -68,18 +68,18 @@ def _reset_resilience_spans(resilience_spans: InMemorySpanExporter):
 # ---------- helpers ----------
 
 
-async def _create_book(library_stub, *, copies: int = 1) -> int:
-    resp = await library_stub.CreateBook(
-        library_pb2.CreateBookRequest(
+async def _create_book(book_stub, *, copies: int = 1) -> int:
+    resp = await book_stub.CreateBook(
+        book_pb2.CreateBookRequest(
             title="Dune", author="Frank Herbert", number_of_copies=copies
         )
     )
     return resp.book.id
 
 
-async def _create_member(library_stub, *, email: str = "patron@example.com") -> int:
-    resp = await library_stub.CreateMember(
-        library_pb2.CreateMemberRequest(name="Patron", email=email)
+async def _create_member(member_stub, *, email: str = "patron@example.com") -> int:
+    resp = await member_stub.CreateMember(
+        member_pb2.CreateMemberRequest(name="Patron", email=email)
     )
     return resp.member.id
 
@@ -100,14 +100,14 @@ def _events_named(spans, name: str):
 
 @pytest.mark.asyncio
 async def test_forced_deadlock_is_retried_transparently(
-    library_stub, resilience_spans: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, resilience_spans: InMemorySpanExporter
 ) -> None:
     """A first-attempt DeadlockDetectedError should be retried and succeed
     on the second attempt; the client sees a normal ``BorrowBookResponse``.
     """
 
-    book_id = await _create_book(library_stub, copies=2)
-    member_id = await _create_member(library_stub, email="dl@example.com")
+    book_id = await _create_book(book_stub, copies=2)
+    member_id = await _create_member(member_stub, email="dl@example.com")
 
     # Patch the repository to raise DeadlockDetectedError once, then call through.
     from library.repositories import loans as loans_repo
@@ -127,8 +127,8 @@ async def test_forced_deadlock_is_retried_transparently(
         return await real_borrow(*args, **kwargs)
 
     with patch.object(loans_repo, "borrow", flaky_borrow):
-        resp = await library_stub.BorrowBook(
-            library_pb2.BorrowBookRequest(book_id=book_id, member_id=member_id)
+        resp = await loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=book_id, member_id=member_id)
         )
 
     # Client got a real response.
@@ -149,20 +149,20 @@ async def test_forced_deadlock_is_retried_transparently(
 
 @pytest.mark.asyncio
 async def test_integrity_error_is_not_retried(
-    library_stub, resilience_spans: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, resilience_spans: InMemorySpanExporter
 ) -> None:
     """A unique-violation on member email is non-retryable: the second
     CreateMember with the same email must fail on the first attempt without
     retrying."""
 
-    await _create_member(library_stub, email="dup@example.com")
+    await _create_member(member_stub, email="dup@example.com")
 
     # Same email a second time → either ALREADY_EXISTS (mapped from
     # IntegrityError to a domain error) or INVALID_ARGUMENT, depending on
     # the existing service mapping. Either way, it must NOT retry.
     with pytest.raises(grpc.aio.AioRpcError) as exc_info:
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(name="Other", email="dup@example.com")
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(name="Other", email="dup@example.com")
         )
     # Whatever code surfaces, it should not be UNAVAILABLE / RESOURCE_EXHAUSTED
     # (those would indicate the integrity error was misclassified as transient).

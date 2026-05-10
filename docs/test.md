@@ -192,7 +192,7 @@ Runs the test at normal speed but with a visible browser so you can watch what h
 
 ### "I changed the .proto"
 
-After editing `proto/library/v1/library.proto`:
+After editing any of `proto/library/v1/{book,member,loan}.proto`:
 
 ```sh
 # Regenerate stubs on both sides

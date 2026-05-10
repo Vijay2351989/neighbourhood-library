@@ -1,20 +1,25 @@
 """Sample gRPC client demonstrating the Neighborhood Library API.
 
 This script is a teaching artefact. Read it top-to-bottom to learn what
-the LibraryService surface looks like end-to-end:
+the three-service surface (BookService / MemberService / LoanService)
+looks like end-to-end:
 
-  1. Create a member.
-  2. Create a book (with one physical copy).
-  3. Borrow the book.
-  4. List active loans — see the borrow appear.
-  5. Return the book.
-  6. List active loans — see it gone.
+  1. Create a member.            (MemberService)
+  2. Create a book (one copy).   (BookService)
+  3. Borrow the book.            (LoanService)
+  4. List active loans — borrow shows up.   (LoanService)
+  5. Return the book.            (LoanService)
+  6. List active loans — borrow gone.       (LoanService)
 
 The script talks to the api service over **native gRPC** on
 ``localhost:50051``. Browsers can't speak native gRPC's HTTP/2 framing,
 which is why the React app at ``http://localhost:3000`` uses gRPC-Web
 through Envoy at ``:8080`` instead. From a regular Python process,
 native gRPC is the simplest path; this file demonstrates that path.
+
+Notice that all three stubs share a single ``grpc.insecure_channel`` —
+gRPC multiplexes services over one HTTP/2 connection so opening three
+channels would just waste sockets.
 
 Run it after the stack is up:
 
@@ -42,8 +47,16 @@ from google.protobuf import wrappers_pb2
 
 # Generated stubs. The codegen tree lives under ``library.generated.*``
 # (see ``backend/scripts/gen_proto.sh`` for why one level deeper than
-# protoc's default emit path).
-from library.generated.library.v1 import library_pb2, library_pb2_grpc
+# protoc's default emit path). One pb2/pb2_grpc pair per service after
+# the proto split.
+from library.generated.library.v1 import (
+    book_pb2,
+    book_pb2_grpc,
+    loan_pb2,
+    loan_pb2_grpc,
+    member_pb2,
+    member_pb2_grpc,
+)
 
 
 # Address resolves to the api container's exposed port; if you've changed
@@ -63,7 +76,7 @@ def _banner(title: str) -> None:
     print(f"=== {title} ===")
 
 
-def _print_loan(loan: library_pb2.Loan) -> None:
+def _print_loan(loan: loan_pb2.Loan) -> None:
     """Pretty-print a Loan message; omits the noise the demo doesn't need."""
 
     returned = (
@@ -103,13 +116,16 @@ def _run(target: str) -> int:
             )
             return 1
 
-        stub = library_pb2_grpc.LibraryServiceStub(channel)
+        # One stub per service — they share the channel above.
+        book_stub = book_pb2_grpc.BookServiceStub(channel)
+        member_stub = member_pb2_grpc.MemberServiceStub(channel)
+        loan_stub = loan_pb2_grpc.LoanServiceStub(channel)
         unique = int(time.time())  # disambiguates rows across runs
 
         # ---- 1. Create a member -------------------------------------
-        _banner("1. CreateMember")
-        create_member_resp = stub.CreateMember(
-            library_pb2.CreateMemberRequest(
+        _banner("1. CreateMember (MemberService)")
+        create_member_resp = member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(
                 name="Sample Reader",
                 email=f"sample-{unique}@example.com",
                 # phone and address are wrapped (StringValue) for nullability;
@@ -121,9 +137,9 @@ def _run(target: str) -> int:
         print(f"  created member id={member.id} name={member.name!r} email={member.email!r}")
 
         # ---- 2. Create a book with one copy --------------------------
-        _banner("2. CreateBook")
-        create_book_resp = stub.CreateBook(
-            library_pb2.CreateBookRequest(
+        _banner("2. CreateBook (BookService)")
+        create_book_resp = book_stub.CreateBook(
+            book_pb2.CreateBookRequest(
                 title="The Sample Manuscript",
                 author="Alex Demo",
                 # ISBN is wrapped (StringValue); supplying it exercises the
@@ -141,11 +157,11 @@ def _run(target: str) -> int:
         )
 
         # ---- 3. Borrow the book --------------------------------------
-        _banner("3. BorrowBook")
+        _banner("3. BorrowBook (LoanService)")
         # ``due_at`` is optional; the server defaults to now + 14 days
         # (DEFAULT_LOAN_DAYS). Omitting it here demonstrates that path.
-        borrow_resp = stub.BorrowBook(
-            library_pb2.BorrowBookRequest(
+        borrow_resp = loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(
                 book_id=book.id,
                 member_id=member.id,
             ),
@@ -156,9 +172,9 @@ def _run(target: str) -> int:
 
         # ---- 4. List active loans ------------------------------------
         _banner("4. ListLoans (filter=ACTIVE) — should include the new loan")
-        active_before = stub.ListLoans(
-            library_pb2.ListLoansRequest(
-                filter=library_pb2.LOAN_FILTER_ACTIVE,
+        active_before = loan_stub.ListLoans(
+            loan_pb2.ListLoansRequest(
+                filter=loan_pb2.LOAN_FILTER_ACTIVE,
                 page_size=50,
             ),
             timeout=_RPC_TIMEOUT_S,
@@ -170,18 +186,18 @@ def _run(target: str) -> int:
             _print_loan(active_loan)
 
         # ---- 5. Return the book --------------------------------------
-        _banner("5. ReturnBook")
-        return_resp = stub.ReturnBook(
-            library_pb2.ReturnBookRequest(loan_id=loan.id),
+        _banner("5. ReturnBook (LoanService)")
+        return_resp = loan_stub.ReturnBook(
+            loan_pb2.ReturnBookRequest(loan_id=loan.id),
             timeout=_RPC_TIMEOUT_S,
         )
         _print_loan(return_resp.loan)
 
         # ---- 6. List active loans again ------------------------------
         _banner("6. ListLoans (filter=ACTIVE) — should NOT include the loan")
-        active_after = stub.ListLoans(
-            library_pb2.ListLoansRequest(
-                filter=library_pb2.LOAN_FILTER_ACTIVE,
+        active_after = loan_stub.ListLoans(
+            loan_pb2.ListLoansRequest(
+                filter=loan_pb2.LOAN_FILTER_ACTIVE,
                 page_size=50,
             ),
             timeout=_RPC_TIMEOUT_S,

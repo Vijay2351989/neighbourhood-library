@@ -91,7 +91,7 @@ For everything else — port-conflict troubleshooting, running without Docker, h
 
 A working four-tier staff application — the librarian opens `http://localhost:3000` and can do everything in the [Key functional scenarios](#key-functional-scenarios) table above. The full surface includes:
 
-- 12 gRPC RPCs covering book CRUD, member CRUD, and loan lifecycle (borrow / return / list / get-member-loans)
+- Three gRPC services — `BookService`, `MemberService`, `LoanService` — split across three proto files (`book.proto`, `member.proto`, `loan.proto`), totalling 12 RPCs over book CRUD, member CRUD, and the loan lifecycle (borrow / return / list / get-member-loans)
 - Schema with normalized `Book` / `BookCopy` split, computed fines (no fines column), and a partial unique index that makes double-borrow structurally impossible
 - Resilience layer with three named retry policies, deadline-aware backoff, and four interlocking database timeouts
 - OpenTelemetry tracing with an opt-in self-hosted SigNoz overlay

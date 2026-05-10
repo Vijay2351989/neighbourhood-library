@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from library.config import Settings
 from library.errors import InvalidArgument
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import loan_pb2
 from library.repositories import loans as loans_repo
 from library.repositories.loans import FineConfig, LoanFilter, LoanRow
 from library.resilience import RETRY_READ, RETRY_WRITE_TX, with_retry
@@ -56,8 +56,8 @@ class LoanService:
 
     @with_retry(RETRY_WRITE_TX)
     async def borrow_book(
-        self, request: library_pb2.BorrowBookRequest
-    ) -> library_pb2.BorrowBookResponse:
+        self, request: loan_pb2.BorrowBookRequest
+    ) -> loan_pb2.BorrowBookResponse:
         with _tracer.start_as_current_span("borrow.validate") as span:
             span.set_attribute("library.book_id", request.book_id)
             span.set_attribute("library.member_id", request.member_id)
@@ -100,12 +100,12 @@ class LoanService:
         with _tracer.start_as_current_span("borrow.build_response"):
             loan_proto = self._loan_row_to_proto(row, now=now)
 
-        return library_pb2.BorrowBookResponse(loan=loan_proto)
+        return loan_pb2.BorrowBookResponse(loan=loan_proto)
 
     @with_retry(RETRY_WRITE_TX)
     async def return_book(
-        self, request: library_pb2.ReturnBookRequest
-    ) -> library_pb2.ReturnBookResponse:
+        self, request: loan_pb2.ReturnBookRequest
+    ) -> loan_pb2.ReturnBookResponse:
         if request.loan_id <= 0:
             raise InvalidArgument("loan_id is required")
 
@@ -142,14 +142,14 @@ class LoanService:
             span.set_attribute("library.fine_cents", fine_cents)
             loan_proto = self._loan_row_to_proto(row, now=now)
 
-        return library_pb2.ReturnBookResponse(loan=loan_proto)
+        return loan_pb2.ReturnBookResponse(loan=loan_proto)
 
     # ---------- reads ----------
 
     @with_retry(RETRY_READ)
     async def list_loans(
-        self, request: library_pb2.ListLoansRequest
-    ) -> library_pb2.ListLoansResponse:
+        self, request: loan_pb2.ListLoansRequest
+    ) -> loan_pb2.ListLoansResponse:
         page_size, offset = clamp_pagination(
             page_size=request.page_size, offset=request.offset
         )
@@ -183,15 +183,15 @@ class LoanService:
                 },
             )
 
-        return library_pb2.ListLoansResponse(
+        return loan_pb2.ListLoansResponse(
             loans=[self._loan_row_to_proto(row, now=now) for row in result.rows],
             total_count=result.total_count,
         )
 
     @with_retry(RETRY_READ)
     async def get_member_loans(
-        self, request: library_pb2.GetMemberLoansRequest
-    ) -> library_pb2.GetMemberLoansResponse:
+        self, request: loan_pb2.GetMemberLoansRequest
+    ) -> loan_pb2.GetMemberLoansResponse:
         if request.member_id <= 0:
             raise InvalidArgument("member_id is required")
         filter_value = _proto_to_domain_filter(request.filter)
@@ -220,13 +220,13 @@ class LoanService:
                 },
             )
 
-        return library_pb2.GetMemberLoansResponse(
+        return loan_pb2.GetMemberLoansResponse(
             loans=[self._loan_row_to_proto(row, now=now) for row in rows],
         )
 
     # ---------- helpers ----------
 
-    def _loan_row_to_proto(self, row: LoanRow, *, now: datetime) -> library_pb2.Loan:
+    def _loan_row_to_proto(self, row: LoanRow, *, now: datetime) -> loan_pb2.Loan:
         loan = row.loan
         is_active = loan.returned_at is None
         is_overdue = is_active and loan.due_at < now
@@ -239,7 +239,7 @@ class LoanService:
             cap_cents=self._fines.cap_cents,
         )
 
-        proto = library_pb2.Loan(
+        proto = loan_pb2.Loan(
             id=loan.id,
             member_id=loan.member_id,
             book_id=row.book_id,

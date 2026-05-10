@@ -274,9 +274,9 @@ web:
 
 Two contexts:
 1. `./frontend` — the Next.js source tree (Dockerfile, package.json, src/)
-2. `./proto` — the proto file, mounted as the named context `proto`
+2. `./proto` — the proto tree, mounted as the named context `proto`
 
-The named context lets the Dockerfile copy the proto file with `COPY --from=proto library/v1/library.proto /tmp/proto/library/v1/library.proto`. This way the frontend image generates its TypeScript stubs from the canonical `proto/library/v1/library.proto`, not from a duplicate inside `frontend/`.
+The named context lets the Dockerfile copy the proto tree with `COPY --from=proto library/v1/ /tmp/proto/library/v1/`. This way the frontend image generates its TypeScript stubs from the canonical `proto/library/v1/{book,member,loan}.proto`, not from a duplicate inside `frontend/`.
 
 #### Frontend Dockerfile structure
 
@@ -284,7 +284,7 @@ The named context lets the Dockerfile copy the proto file with `COPY --from=prot
 FROM node:20-alpine
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY --from=proto library/v1/library.proto src/proto/...
+COPY --from=proto library/v1/ src/proto/library/v1/
 RUN npm run gen:proto                 # buf generate → src/generated/
 COPY src/ ./src/
 COPY tsconfig.json next.config.ts ...
@@ -510,6 +510,27 @@ Behind `profiles: ["observability"]` — not started by default. Activate with:
 ```sh
 docker compose --env-file .env.observability --profile observability up -d
 ```
+
+### First-time signup (creating the SigNoz admin)
+
+SigNoz stores its own users in a SQLite DB inside the `signoz-data` volume — they are **not** baked into the image and there is no default username/password. The first time you bring the stack up on a given machine, that DB is empty and SigNoz will accept exactly one self-registration:
+
+1. Wait ~30s for the schema migrator to finish, then open http://localhost:3301
+2. The UI auto-redirects to `/signup` (you can confirm with `curl -s http://localhost:3301/api/v1/version` — `setupCompleted: false` means signup is open)
+3. Fill in **Name**, **Organization name**, **Email**, **Password**. Submit.
+4. That account becomes the org admin.
+
+After this, `/signup` is locked. Any further teammates have to be added from inside the UI: **Settings → Members → Invite member**.
+
+To start over with a different admin email, you have to drop the volume:
+
+```sh
+docker compose --profile observability down -v
+docker volume rm neighborhood-library_signoz-data   # if 'down -v' didn't catch it
+docker compose --profile observability up -d
+```
+
+### Container topology
 
 Adds six containers:
 

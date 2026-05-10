@@ -40,10 +40,23 @@ class RequestContextInterceptor(ServerInterceptor):
         self,
         continuation: Callable[[grpc.HandlerCallDetails], Awaitable[grpc.RpcMethodHandler]],
         handler_call_details: grpc.HandlerCallDetails,
-    ) -> grpc.RpcMethodHandler:
+    ) -> grpc.RpcMethodHandler | None:
         # Resolve the inner handler; we wrap whichever method type it is so
         # we can capture status + duration around the actual call.
         handler = await continuation(handler_call_details)
+
+        # `continuation` returns None when no method handler is registered
+        # for the requested path — gRPC's standard signal for "unimplemented".
+        # The most common trigger is a probe for a method we haven't registered
+        # (e.g. grpcui calling `grpc.reflection.v1.ServerReflection` when our
+        # server only registers `grpc.reflection.v1alpha.ServerReflection` —
+        # grpcui then falls back to v1alpha automatically). We must propagate
+        # the None upward unchanged so gRPC can synthesise the correct
+        # UNIMPLEMENTED response; wrapping or dereferencing here would mask
+        # the protocol behaviour.
+        if handler is None:
+            return None
+
         method = handler_call_details.method  # e.g. "/library.v1.LibraryService/BorrowBook"
 
         if handler.unary_unary is not None:

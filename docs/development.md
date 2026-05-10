@@ -37,7 +37,10 @@ Top-level structure with one-line descriptions:
 
 ```
 neighborhood-library/
-├── proto/library/v1/library.proto    ← single source of truth for the API
+├── proto/library/v1/                 ← single source of truth for the API
+│   ├── book.proto                    ←   BookService (book CRUD)
+│   ├── member.proto                  ←   MemberService (member CRUD)
+│   └── loan.proto                    ←   LoanService (borrow / return / list)
 ├── backend/                          ← Python gRPC service
 ├── frontend/                         ← Next.js + React UI
 ├── deploy/envoy/envoy.yaml           ← Envoy config (gRPC-Web bridge)
@@ -49,7 +52,7 @@ neighborhood-library/
 
 **Layering rule of thumb (backend):** `servicer` knows protobuf, `services` knows protobuf+domain+errors, `repositories` knows SQL, `db/models` knows ORM. Each layer never reaches into the layer two below it.
 
-**Layering rule of thumb (frontend):** Pages call `client.X()` from `@/lib/client`, wrapped in TanStack Query (`useQuery` / `useMutation`). Components are decorative; data lives in pages and hooks.
+**Layering rule of thumb (frontend):** Pages call the matching client (`bookClient` / `memberClient` / `loanClient`) from `@/lib/client`, wrapped in TanStack Query (`useQuery` / `useMutation`). Components are decorative; data lives in pages and hooks.
 
 For a more granular file-tree view see [`design/03-backend.md`](design/03-backend.md) §1 and [`design/04-frontend.md`](design/04-frontend.md) §1.
 
@@ -64,7 +67,9 @@ Four physical layers, ordered from "outermost" (proto-aware) to "innermost" (SQL
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  servicer.py                                                 │
-│  - Implements LibraryServiceServicer (generated base class)  │
+│  - Implements 3 generated base classes:                      │
+│      BookServiceServicer / MemberServiceServicer /           │
+│      LoanServiceServicer  (one Python class each)            │
 │  - Translates: proto request → service call → proto response │
 │  - Catches DomainError → maps to grpc.StatusCode             │
 │  - NO business logic here                                    │
@@ -337,10 +342,11 @@ For full design rationale, see [`design/01-database.md` §3](design/01-database.
 Putting it all together — a reference recipe for adding `MarkBookLost(book_id, copy_id)` to the API:
 
 ```sh
-# 1. Edit the proto
-$EDITOR proto/library/v1/library.proto
+# 1. Edit the proto for the right service
+$EDITOR proto/library/v1/book.proto
 # Add: rpc MarkBookLost(MarkBookLostRequest) returns (MarkBookLostResponse);
-# Define the two message types.
+# inside `service BookService { ... }`. Define the two message types.
+# (Use member.proto / loan.proto for those subdomains instead.)
 
 # 2. Regenerate stubs (both sides)
 cd backend  && uv run bash scripts/gen_proto.sh && cd ..
@@ -349,28 +355,31 @@ cd frontend && npm run gen:proto                && cd ..
 # 3. Add service-layer logic
 $EDITOR backend/src/library/services/book_service.py
 # Add `async def mark_book_lost(self, request) -> MarkBookLostResponse:`
-# Decorate with @with_retry(RETRY_WRITE_TX)
+# Decorate with @with_retry(RETRY_WRITE_TX). Imports use `book_pb2`.
 
 # 4. Add the SQL in the repository
 $EDITOR backend/src/library/repositories/books.py
 # Add `async def update_copy_status(session, copy_id, status) -> BookCopy:`
 
-# 5. Wire the servicer
+# 5. Wire the servicer (BookServicer for a book RPC)
 $EDITOR backend/src/library/servicer.py
-# Add `async def MarkBookLost(self, request, context):`
+# Add `async def MarkBookLost(self, request, context):` to `class BookServicer`
 # It should: call self._book_service.mark_book_lost(request)
 # The error decorator handles DomainError → grpc.StatusCode mapping
+# (Member RPCs go in MemberServicer; loan RPCs in LoanServicer.)
 
 # 6. Add an integration test
 $EDITOR backend/tests/integration/test_books.py
-# Test happy path, NOT_FOUND on bad copy_id, FAILED_PRECONDITION on already-lost
+# Use the `book_stub` fixture; import `book_pb2`.
+# Test happy path, NOT_FOUND on bad copy_id, FAILED_PRECONDITION on already-lost.
 
 # 7. Run tests
 ./test.sh integration
 
 # 8. (When ready) wire the frontend to call it
 $EDITOR frontend/src/components/BookDetail.tsx
-# Add a button that calls client.markBookLost({...}) via useMutation
+# Add a button that calls bookClient.markBookLost({...}) via useMutation.
+# (Member RPCs → memberClient; loan RPCs → loanClient.)
 ```
 
 This pattern — proto → regen → repository → service → servicer → test → frontend — is the canonical change shape for any new RPC.
@@ -557,19 +566,19 @@ $EDITOR frontend/src/lib/queryKeys.ts
 
 ### 4.1 The two codegens and what each produces
 
-The `.proto` at `proto/library/v1/library.proto` is the **single source of truth**. Both backend and frontend generate from it but produce different artifacts:
+The three `.proto` files under `proto/library/v1/` (`book.proto`, `member.proto`, `loan.proto`) are the **single source of truth**. Both backend and frontend generate from all three in one pass but produce different artifacts:
 
-| Side | Tool | Plugins | Output | Run via |
+| Side | Tool | Plugins | Output (per service) | Run via |
 |---|---|---|---|---|
-| Backend | `python -m grpc_tools.protoc` | (built-in to grpcio-tools) | `library_pb2.py` (messages), `library_pb2_grpc.py` (stub + servicer base), `library_pb2.pyi` (type stubs) | `bash backend/scripts/gen_proto.sh` |
-| Frontend | `buf generate` | `protoc-gen-es` (messages), `protoc-gen-connect-es` (service descriptor) | `library_pb.ts` (TypeScript classes), `library_connect.ts` (Connect descriptor) | `npm run gen:proto` |
+| Backend | `python -m grpc_tools.protoc` | (built-in to grpcio-tools) | `<svc>_pb2.py` (messages), `<svc>_pb2_grpc.py` (stub + servicer base), `<svc>_pb2.pyi` (type stubs) — `<svc>` ∈ {`book`, `member`, `loan`} | `bash backend/scripts/gen_proto.sh` |
+| Frontend | `buf generate` | `protoc-gen-es` (messages), `protoc-gen-connect-es` (service descriptor) | `<svc>_pb.ts` (TypeScript classes), `<svc>_connect.ts` (Connect descriptor) | `npm run gen:proto` |
 
-Both output trees are gitignored. Both are regenerated on Docker builds. For local dev you must regenerate manually after editing the proto.
+Both output trees are gitignored. Both are regenerated on Docker builds. For local dev you must regenerate manually after editing any of the three protos.
 
 ### 4.2 When and how to regenerate
 
 **When:**
-- You edited `proto/library/v1/library.proto`
+- You edited any of `proto/library/v1/{book,member,loan}.proto`
 - You're on a fresh clone (the `generated/` dirs are empty)
 - Your IDE is reporting "module not found" for the generated stubs
 
@@ -609,16 +618,18 @@ After regenerating, both sides may have new types. Re-run TypeScript / Python ty
 
 #### The backend import-rewrite trick
 
-`grpc_tools.protoc` emits `from library.v1 import library_pb2` inside `library_pb2_grpc.py`. But our generated tree lives one level deeper at `library.generated.library.v1`. Without correction, the import would fail at runtime.
+`grpc_tools.protoc` emits `from library.v1 import <svc>_pb2` inside each `<svc>_pb2_grpc.py`. But our generated tree lives one level deeper at `library.generated.library.v1`. Without correction, the import would fail at runtime.
 
-`scripts/gen_proto.sh` includes a `perl -pi -e` line that rewrites the import in place:
+`scripts/gen_proto.sh` loops over the three services and runs a `perl -pi -e` rewrite on each `_grpc.py`:
 
 ```bash
-perl -pi -e 's|^from library\.v1 import library_pb2|from library.generated.library.v1 import library_pb2|' \
-    "$OUT_DIR/library/v1/library_pb2_grpc.py"
+for svc in book member loan; do
+    perl -pi -e "s|^from library\\.v1 import ${svc}_pb2|from library.generated.library.v1 import ${svc}_pb2|" \
+        "$OUT_DIR/library/v1/${svc}_pb2_grpc.py"
+done
 ```
 
-Classic protoc gotcha — well-known issue, simple fix.
+Classic protoc gotcha — well-known issue, simple fix. The script also `rm`s any stale `*_pb2*` files first, so renaming or removing a service won't leave a shadow module behind.
 
 #### The frontend `import_extension=none` flag
 
@@ -633,7 +644,7 @@ plugins:
       - import_extension=none      # ← fixes Turbopack resolver issue
 ```
 
-Default is `protoc-gen-es` emits `from "./library_pb.js"` imports (with `.js`), which Turbopack rejects. `import_extension=none` produces extension-less imports that resolve cleanly.
+Default is `protoc-gen-es` emits `from "./book_pb.js"` (etc) imports with `.js` suffix, which Turbopack rejects. `import_extension=none` produces extension-less imports that resolve cleanly.
 
 #### Why two plugins, not one
 
@@ -780,7 +791,7 @@ Now every SQL statement and result prints to stdout. Don't commit this — it's 
 
 # Use grpcurl to drive the API directly
 grpcurl -plaintext -d '{"book_id": 1, "member_id": 1}' \
-  localhost:50052 library.v1.LibraryService/BorrowBook
+  localhost:50052 library.v1.LoanService/BorrowBook
 
 # When done
 ./test.sh teardown

@@ -29,15 +29,15 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-from library.generated.library.v1 import library_pb2
+from library.generated.library.v1 import book_pb2, loan_pb2, member_pb2
 
 
 @pytest.fixture(scope="session")
 def span_exporter() -> Iterator[InMemorySpanExporter]:
     """Install an in-memory exporter on the global tracer provider for the suite.
 
-    The grpc_server fixture runs the LibraryServicer in this same process, so
-    the in-memory exporter captures spans from real RPC handling.
+    The grpc_server fixture runs the three business servicers in this same
+    process, so the in-memory exporter captures spans from real RPC handling.
     """
 
     exporter = InMemorySpanExporter()
@@ -83,25 +83,25 @@ def _events_named(spans: list[ReadableSpan], name: str) -> list:
 
 
 async def test_borrow_emits_expected_spans_and_loan_created_event(
-    library_stub, span_exporter: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, span_exporter: InMemorySpanExporter
 ) -> None:
     book = (
-        await library_stub.CreateBook(
-            library_pb2.CreateBookRequest(
+        await book_stub.CreateBook(
+            book_pb2.CreateBookRequest(
                 title="Dune", author="Herbert", number_of_copies=1
             )
         )
     ).book
     member = (
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(name="Ada", email="ada@example.com")
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(name="Ada", email="ada@example.com")
         )
     ).member
 
     span_exporter.clear()  # focus the assertions on the borrow call only
 
-    await library_stub.BorrowBook(
-        library_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
+    await loan_stub.BorrowBook(
+        loan_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
     )
 
     spans = _all_spans(span_exporter)
@@ -123,27 +123,27 @@ async def test_borrow_emits_expected_spans_and_loan_created_event(
 
 
 async def test_borrow_no_copies_emits_contention_event_and_errors_root(
-    library_stub, span_exporter: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, span_exporter: InMemorySpanExporter
 ) -> None:
     book = (
-        await library_stub.CreateBook(
-            library_pb2.CreateBookRequest(
+        await book_stub.CreateBook(
+            book_pb2.CreateBookRequest(
                 title="Foundation", author="Asimov", number_of_copies=1
             )
         )
     ).book
     a = (
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(name="A", email="a@example.com")
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(name="A", email="a@example.com")
         )
     ).member
     b = (
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(name="B", email="b@example.com")
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(name="B", email="b@example.com")
         )
     ).member
-    await library_stub.BorrowBook(
-        library_pb2.BorrowBookRequest(book_id=book.id, member_id=a.id)
+    await loan_stub.BorrowBook(
+        loan_pb2.BorrowBookRequest(book_id=book.id, member_id=a.id)
     )
 
     span_exporter.clear()
@@ -151,8 +151,8 @@ async def test_borrow_no_copies_emits_contention_event_and_errors_root(
     import grpc as _grpc
 
     with pytest.raises(_grpc.aio.AioRpcError):
-        await library_stub.BorrowBook(
-            library_pb2.BorrowBookRequest(book_id=book.id, member_id=b.id)
+        await loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=book.id, member_id=b.id)
         )
 
     spans = _all_spans(span_exporter)
@@ -162,29 +162,29 @@ async def test_borrow_no_copies_emits_contention_event_and_errors_root(
 
 
 async def test_return_emits_loan_returned_event_with_attrs(
-    library_stub, span_exporter: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, span_exporter: InMemorySpanExporter
 ) -> None:
     book = (
-        await library_stub.CreateBook(
-            library_pb2.CreateBookRequest(
+        await book_stub.CreateBook(
+            book_pb2.CreateBookRequest(
                 title="Anathem", author="Stephenson", number_of_copies=1
             )
         )
     ).book
     member = (
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(name="N", email="n@example.com")
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(name="N", email="n@example.com")
         )
     ).member
     loan = (
-        await library_stub.BorrowBook(
-            library_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
+        await loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
         )
     ).loan
 
     span_exporter.clear()
 
-    await library_stub.ReturnBook(library_pb2.ReturnBookRequest(loan_id=loan.id))
+    await loan_stub.ReturnBook(loan_pb2.ReturnBookRequest(loan_id=loan.id))
 
     spans = _all_spans(span_exporter)
     assert "return.transaction" in _span_names(spans)
@@ -198,11 +198,11 @@ async def test_return_emits_loan_returned_event_with_attrs(
 
 
 async def test_request_id_is_set_on_root_span(
-    library_stub, span_exporter: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, span_exporter: InMemorySpanExporter
 ) -> None:
     """Every RPC root span carries the request.id stamped by the interceptor."""
 
-    await library_stub.ListBooks(library_pb2.ListBooksRequest())
+    await book_stub.ListBooks(book_pb2.ListBooksRequest())
 
     spans = _all_spans(span_exporter)
     # The gRPC auto-instrumentation creates a SERVER span as the root. Its
@@ -219,22 +219,22 @@ async def test_request_id_is_set_on_root_span(
 
 
 async def test_no_pii_in_span_attributes_for_borrow_flow(
-    library_stub, span_exporter: InMemorySpanExporter
+    book_stub, loan_stub, member_stub, span_exporter: InMemorySpanExporter
 ) -> None:
     """Across a representative borrow flow, no member-PII or book title leaks
     into any span or event attribute. IDs are fine; names/emails/titles are not.
     """
 
     book = (
-        await library_stub.CreateBook(
-            library_pb2.CreateBookRequest(
+        await book_stub.CreateBook(
+            book_pb2.CreateBookRequest(
                 title="UNIQUEBOOKTITLE", author="UNIQUEAUTHOR", number_of_copies=1
             )
         )
     ).book
     member = (
-        await library_stub.CreateMember(
-            library_pb2.CreateMemberRequest(
+        await member_stub.CreateMember(
+            member_pb2.CreateMemberRequest(
                 name="UNIQUE_MEMBER_NAME", email="unique@example.com"
             )
         )
@@ -242,8 +242,8 @@ async def test_no_pii_in_span_attributes_for_borrow_flow(
 
     span_exporter.clear()
 
-    await library_stub.BorrowBook(
-        library_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
+    await loan_stub.BorrowBook(
+        loan_pb2.BorrowBookRequest(book_id=book.id, member_id=member.id)
     )
 
     forbidden_substrings = [

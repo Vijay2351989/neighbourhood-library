@@ -24,7 +24,10 @@ backend/
 │   └── versions/
 │       └── 0001_initial.py     # the schema in design/01-database.md
 ├── proto/                      # symlink or build-time copy of repo-root proto/
-│   └── library/v1/library.proto
+│   └── library/v1/
+│       ├── book.proto           # BookService
+│       ├── member.proto         # MemberService
+│       └── loan.proto           # LoanService
 ├── src/
 │   └── library/
 │       ├── __init__.py
@@ -43,12 +46,13 @@ backend/
 │       │   ├── member_service.py
 │       │   ├── loan_service.py
 │       │   └── fines.py        # pure-function fine arithmetic (see design/01-database.md §5)
-│       ├── servicer.py         # the LibraryServiceServicer class — thin glue, error mapping
+│       ├── servicer.py         # BookServicer / MemberServicer / LoanServicer — thin glue, error mapping
 │       ├── errors.py           # domain exceptions + grpc status mapping
 │       └── generated/          # protoc output — gitignored, regenerated on build
 │           └── library/v1/
-│               ├── library_pb2.py
-│               └── library_pb2_grpc.py
+│               ├── book_pb2.py        + book_pb2_grpc.py
+│               ├── member_pb2.py      + member_pb2_grpc.py
+│               └── loan_pb2.py        + loan_pb2_grpc.py
 ├── scripts/
 │   ├── gen_proto.sh            # runs python -m grpc_tools.protoc against proto/
 │   ├── seed.py                 # populates sample books, members, loans via the gRPC API
@@ -73,7 +77,7 @@ backend/
 - **`repositories/*`** — every line of SQL lives here. No protobuf imports allowed.
 - **`services/*`** — orchestrate repositories, do protobuf↔domain conversion, raise typed domain errors.
 - **`services/fines.py`** — pure-function `compute_fine_cents(due_at, returned_at, now, grace_days, per_day_cents, cap_cents) -> int`. No I/O, no proto imports — purely arithmetic. Used by `loan_service` when building Loan/Member responses.
-- **`servicer.py`** — implements the generated `LibraryServiceServicer`, catches domain errors, maps them to gRPC status, returns response messages. No business logic.
+- **`servicer.py`** — three thin classes (`BookServicer`, `MemberServicer`, `LoanServicer`) implementing the matching generated `*Servicer` base classes. Each method delegates to the corresponding service object and lets a decorator translate domain errors to gRPC status. No business logic.
 - **`errors.py`** — `class NotFound`, `class AlreadyExists`, `class FailedPrecondition`, `class InvalidArgument` plus a decorator that the servicer uses to translate them.
 - **`scripts/sample_client.py`** — a standalone Python file using the generated client stubs to do: create member, create book, borrow, list loans, return, list loans again. Demonstrates the API for reviewers.
 
@@ -105,7 +109,7 @@ db/models.py       ← SQLAlchemy mappings
 
 - `backend/src/library/generated/` is in `.gitignore`.
 - `scripts/gen_proto.sh` runs at container build time (and locally via `uv run gen-proto`).
-- The same `.proto` is consumed by the frontend codegen, so it lives at the **repo root** as `proto/library/v1/library.proto`. Both backend and frontend reference it from there.
+- The three `.proto` files are also consumed by the frontend codegen, so they live at the **repo root** as `proto/library/v1/{book,member,loan}.proto`. Both backend and frontend reference them from there.
 
 ---
 

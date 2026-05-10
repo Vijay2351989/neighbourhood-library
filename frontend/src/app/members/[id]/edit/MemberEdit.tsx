@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { memberClient } from "@/lib/client";
 import { memberKeys } from "@/lib/queryKeys";
 import { MemberForm } from "@/components/MemberForm";
 import type { MemberFormValues } from "@/components/MemberForm";
@@ -29,12 +29,12 @@ export function MemberEdit({ id }: { id: string }) {
 
   const memberQ = useQuery({
     queryKey: memberKeys.detail(id),
-    queryFn: () => client.getMember({ id: BigInt(id) }),
+    queryFn: () => memberClient.getMember({ id: BigInt(id) }),
   });
 
   const mutation = useMutation({
     mutationFn: (v: MemberFormValues) =>
-      client.updateMember({
+      memberClient.updateMember({
         id: BigInt(id),
         name: v.name.trim(),
         email: v.email.trim(),

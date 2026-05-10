@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Code } from "@connectrpc/connect";
-import { client } from "@/lib/client";
+import { memberClient } from "@/lib/client";
 import { memberKeys } from "@/lib/queryKeys";
 import { MemberForm } from "@/components/MemberForm";
 import type { MemberFormValues } from "@/components/MemberForm";
@@ -26,7 +26,7 @@ export default function NewMemberPage() {
 
   const mutation = useMutation({
     mutationFn: (v: MemberFormValues) =>
-      client.createMember({
+      memberClient.createMember({
         name: v.name.trim(),
         email: v.email.trim(),
         phone: v.phone.trim() ? v.phone.trim() : undefined,

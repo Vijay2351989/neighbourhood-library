@@ -1,6 +1,7 @@
 "use client";
 
-import type { Book, Member } from "@/generated/library/v1/library_pb";
+import type { Book } from "@/generated/library/v1/book_pb";
+import type { Member } from "@/generated/library/v1/member_pb";
 import { Dialog } from "@/components/ui/Dialog";
 
 export interface BorrowDialogProps {

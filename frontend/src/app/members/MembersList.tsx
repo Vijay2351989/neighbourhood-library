@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { client } from "@/lib/client";
+import { memberClient } from "@/lib/client";
 import { memberKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -64,7 +64,7 @@ export function MembersList() {
   const { data, isLoading, error } = useQuery({
     queryKey: memberKeys.list(queryParams),
     queryFn: () =>
-      client.listMembers({
+      memberClient.listMembers({
         search: search || undefined,
         offset,
         pageSize: PAGE_SIZE,

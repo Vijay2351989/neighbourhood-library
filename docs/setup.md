@@ -371,7 +371,8 @@ You don't need grpcui to use the app. `grpcurl` is a command-line alternative th
 
 ```sh
 grpcurl -plaintext localhost:50051 list
-grpcurl -plaintext -d '{"page_size": 10}' localhost:50051 library.v1.LibraryService/ListBooks
+# → library.v1.BookService, library.v1.MemberService, library.v1.LoanService
+grpcurl -plaintext -d '{"page_size": 10}' localhost:50051 library.v1.BookService/ListBooks
 ```
 
 Either way, the app at http://localhost:3000 is fully functional without grpcui.
@@ -452,7 +453,7 @@ Regardless of path:
 | http://localhost:3000 | Next.js dashboard with five count tiles |
 | http://localhost:3000/books | Empty paginated table; "+ New book" button top-right |
 | http://localhost:9901/ready | `LIVE` (Envoy admin) |
-| http://localhost:8082 *(if grpcui is running)* | gRPC explorer page listing every method on `library.v1.LibraryService` |
+| http://localhost:8082 *(if grpcui is running)* | gRPC explorer page listing every method on `library.v1.BookService`, `library.v1.MemberService`, and `library.v1.LoanService` |
 | `grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check` | `{"status": "SERVING"}` |
 | `psql -h localhost -U postgres -d library -c '\dt'` | Five tables: alembic_version, book_copies, books, loans, members |
 
