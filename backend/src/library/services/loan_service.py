@@ -195,18 +195,25 @@ class LoanService:
         if request.member_id <= 0:
             raise InvalidArgument("member_id is required")
         filter_value = _proto_to_domain_filter(request.filter)
+        page_size, offset = clamp_pagination(
+            page_size=request.page_size, offset=request.offset
+        )
 
         now = _now_utc()
         span = trace.get_current_span()
         if span is not None and span.is_recording():
             span.set_attribute("library.member_id", request.member_id)
             span.set_attribute("library.list.filter", filter_value.name)
+            span.set_attribute("library.list.page_size", page_size)
+            span.set_attribute("library.list.offset", offset)
 
         async with self._session_factory() as session:
-            rows = await loans_repo.get_member_loans(
+            result = await loans_repo.get_member_loans(
                 session,
                 member_id=request.member_id,
                 filter_value=filter_value,
+                limit=page_size,
+                offset=offset,
                 now=now,
                 fines=self._fines,
             )
@@ -216,12 +223,14 @@ class LoanService:
                 "member_loans.returned",
                 attributes={
                     "library.member_id": request.member_id,
-                    "library.count": len(rows),
+                    "library.list.returned_count": len(result.rows),
+                    "library.list.total_count": result.total_count,
                 },
             )
 
         return loan_pb2.GetMemberLoansResponse(
-            loans=[self._loan_row_to_proto(row, now=now) for row in rows],
+            loans=[self._loan_row_to_proto(row, now=now) for row in result.rows],
+            total_count=result.total_count,
         )
 
     # ---------- helpers ----------

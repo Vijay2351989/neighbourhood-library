@@ -21,6 +21,7 @@ import {
   TR,
   Table,
 } from "@/components/ui/Table";
+import { Pagination } from "@/components/ui/Pagination";
 import { ReturnButton } from "@/components/ReturnButton";
 import { EmptyState } from "@/components/EmptyState";
 import { formatCents, formatDate } from "@/lib/format";
@@ -32,9 +33,18 @@ const FILTER_FOR: Record<TabKey, LoanFilter> = {
   returned: LoanFilter.RETURNED,
   all: LoanFilter.UNSPECIFIED,
 };
+const PAGE_SIZE = 10;
 
 export function MemberDetail({ id }: { id: string }) {
   const [tab, setTab] = useState<TabKey>("active");
+  const [offset, setOffset] = useState(0);
+
+  // Reset to the first page whenever the tab changes — the previous
+  // offset doesn't translate across filters.
+  const changeTab = (next: TabKey) => {
+    setTab(next);
+    setOffset(0);
+  };
 
   const memberQ = useQuery({
     queryKey: memberKeys.detail(id),
@@ -44,11 +54,17 @@ export function MemberDetail({ id }: { id: string }) {
   });
 
   const loansQ = useQuery({
-    queryKey: memberKeys.loans(id, FILTER_FOR[tab]),
+    queryKey: memberKeys.loans(id, {
+      filter: FILTER_FOR[tab],
+      offset,
+      pageSize: PAGE_SIZE,
+    }),
     queryFn: () =>
       loanClient.getMemberLoans({
         memberId: BigInt(id),
         filter: FILTER_FOR[tab],
+        offset,
+        pageSize: PAGE_SIZE,
       }),
     enabled: memberQ.isSuccess,
   });
@@ -166,7 +182,7 @@ export function MemberDetail({ id }: { id: string }) {
           <div className="px-5 pt-3">
             <Tabs<TabKey>
               value={tab}
-              onChange={setTab}
+              onChange={changeTab}
               options={[
                 { value: "active", label: "Active" },
                 { value: "returned", label: "Returned" },
@@ -254,6 +270,14 @@ export function MemberDetail({ id }: { id: string }) {
                 )}
               </TBody>
             </Table>
+            <div className="px-3">
+              <Pagination
+                offset={offset}
+                pageSize={PAGE_SIZE}
+                totalCount={loansQ.data?.totalCount ?? 0}
+                onChange={setOffset}
+              />
+            </div>
           </div>
         </CardBody>
       </Card>

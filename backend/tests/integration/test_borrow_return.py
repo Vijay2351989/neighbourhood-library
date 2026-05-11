@@ -589,3 +589,98 @@ async def test_get_member_loans_filter_active(book_stub, loan_stub, member_stub)
         )
     )
     assert [l.id for l in resp.loans] == [active_id]
+
+
+async def test_get_member_loans_returns_total_count(
+    book_stub, loan_stub, member_stub
+) -> None:
+    """``total_count`` reflects the matching-rows count across all pages."""
+
+    member_id = await _create_member(member_stub)
+    book_ids = [
+        await _create_book(book_stub, title=f"Book {i}") for i in range(3)
+    ]
+    for bid in book_ids:
+        await loan_stub.BorrowBook(
+            loan_pb2.BorrowBookRequest(book_id=bid, member_id=member_id)
+        )
+
+    resp = await loan_stub.GetMemberLoans(
+        loan_pb2.GetMemberLoansRequest(member_id=member_id)
+    )
+    assert resp.total_count == 3
+    assert len(resp.loans) == 3
+
+
+async def test_get_member_loans_paginates_pages(
+    book_stub, loan_stub, member_stub
+) -> None:
+    """page_size + offset returns disjoint, contiguous slices most-recent-first."""
+
+    member_id = await _create_member(member_stub)
+    # Borrow 5 books; each borrow happens after the last, so iteration order
+    # is borrow-order and the response order is the reverse.
+    loan_ids: list[int] = []
+    for i in range(5):
+        book_id = await _create_book(book_stub, title=f"Book {i}")
+        loan_id = (
+            await loan_stub.BorrowBook(
+                loan_pb2.BorrowBookRequest(book_id=book_id, member_id=member_id)
+            )
+        ).loan.id
+        loan_ids.append(loan_id)
+    expected_desc = list(reversed(loan_ids))
+
+    page1 = await loan_stub.GetMemberLoans(
+        loan_pb2.GetMemberLoansRequest(
+            member_id=member_id, page_size=2, offset=0
+        )
+    )
+    page2 = await loan_stub.GetMemberLoans(
+        loan_pb2.GetMemberLoansRequest(
+            member_id=member_id, page_size=2, offset=2
+        )
+    )
+    page3 = await loan_stub.GetMemberLoans(
+        loan_pb2.GetMemberLoansRequest(
+            member_id=member_id, page_size=2, offset=4
+        )
+    )
+
+    assert [l.id for l in page1.loans] == expected_desc[0:2]
+    assert [l.id for l in page2.loans] == expected_desc[2:4]
+    assert [l.id for l in page3.loans] == expected_desc[4:5]
+    assert page1.total_count == 5
+    assert page2.total_count == 5
+    assert page3.total_count == 5
+
+
+async def test_get_member_loans_offset_beyond_results(
+    book_stub, loan_stub, member_stub
+) -> None:
+    """An offset past the end returns an empty page with the correct total."""
+
+    member_id = await _create_member(member_stub)
+    book_id = await _create_book(book_stub)
+    await loan_stub.BorrowBook(
+        loan_pb2.BorrowBookRequest(book_id=book_id, member_id=member_id)
+    )
+
+    resp = await loan_stub.GetMemberLoans(
+        loan_pb2.GetMemberLoansRequest(member_id=member_id, page_size=10, offset=99)
+    )
+    assert resp.loans == []
+    assert resp.total_count == 1
+
+
+async def test_get_member_loans_rejects_negative_pagination(
+    loan_stub, member_stub
+) -> None:
+    member_id = await _create_member(member_stub)
+    for bad in (
+        loan_pb2.GetMemberLoansRequest(member_id=member_id, offset=-1),
+        loan_pb2.GetMemberLoansRequest(member_id=member_id, page_size=-5),
+    ):
+        with pytest.raises(grpc.aio.AioRpcError) as exc_info:
+            await loan_stub.GetMemberLoans(bad)
+        assert exc_info.value.code() == grpc.StatusCode.INVALID_ARGUMENT

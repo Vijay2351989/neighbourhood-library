@@ -20,8 +20,10 @@ export const memberKeys = {
     [...memberKeys.lists(), params] as const,
   details: () => [...memberKeys.all, "detail"] as const,
   detail: (id: string) => [...memberKeys.details(), id] as const,
-  loans: (id: string, filter: LoanFilter) =>
-    [...memberKeys.detail(id), "loans", filter] as const,
+  loans: (
+    id: string,
+    params: { filter: LoanFilter; offset?: number; pageSize?: number },
+  ) => [...memberKeys.detail(id), "loans", params] as const,
 };
 
 export const loanKeys = {
