@@ -138,6 +138,12 @@ def map_domain_errors(fn: F) -> F:
                 span.set_status(Status(StatusCode.ERROR, str(exc)))
                 span.record_exception(exc)
 
+            # Two mutually exclusive paths: a classified transient infra
+            # error maps to UNAVAILABLE/RESOURCE_EXHAUSTED, anything else
+            # is a real bug → INTERNAL. We use an explicit if/else (rather
+            # than relying on context.abort() raising AbortError to skip
+            # the next block) so the control flow stays correct even when
+            # context is mocked in tests or the grpc-aio contract shifts.
             if grpc_status is not None:
                 # Don't dump traceback at WARNING — these are expected under
                 # load. INFO with the classification keeps logs readable.
@@ -148,9 +154,9 @@ def map_domain_errors(fn: F) -> F:
                     grpc_status.name,
                 )
                 await context.abort(grpc_status, f"{cls.value}: {exc}")
-
-            logger.exception("uncaught error in %s", fn.__qualname__)
-            await context.abort(grpc.StatusCode.INTERNAL, "internal error")
+            else:
+                logger.exception("uncaught error in %s", fn.__qualname__)
+                await context.abort(grpc.StatusCode.INTERNAL, "internal error")
 
     return wrapper  # type: ignore[return-value]
 
