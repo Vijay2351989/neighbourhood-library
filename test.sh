@@ -231,6 +231,32 @@ wait_for() {
 # steps
 # ============================================================================
 
+# Regenerate proto stubs so any edit to proto/library/v1/*.proto is reflected
+# before tests run. Docker builds always regen — but `test.sh` runs pytest
+# against the host source tree, so stale stubs there would surface as
+# `Protocol message X has no "field" field` errors that look like real test
+# failures. Regen is idempotent and fast (~1s), so it's safe to run every
+# time. Scoped to phases that actually need it.
+if [ "$RUN_UNIT" = "1" ] || [ "$RUN_INTEGRATION" = "1" ] || [ "$RUN_SAMPLE" = "1" ]; then
+    section "Regenerating backend proto stubs"
+    (
+        cd backend
+        uv sync --extra dev --quiet
+        uv run bash scripts/gen_proto.sh
+    )
+fi
+if [ "$RUN_TS" = "1" ] || [ "$RUN_E2E" = "1" ]; then
+    section "Regenerating frontend proto stubs"
+    (
+        cd frontend
+        if [ ! -d node_modules ]; then
+            echo "${DIM}(installing frontend deps)${RESET}"
+            npm install --silent
+        fi
+        npm run gen:proto --silent
+    )
+fi
+
 if [ "$RUN_UNIT" = "1" ]; then
     section "Backend unit tests"
     (
