@@ -66,9 +66,12 @@ message ListLoansResponse {
 message GetMemberLoansRequest {
   int64 member_id = 1;
   LoanFilter filter = 2;
+  int32 page_size = 3;   // default 25, max 100 (same clamp as ListLoans)
+  int32 offset = 4;
 }
 message GetMemberLoansResponse {
   repeated Loan loans = 1;
+  int32 total_count = 2; // total matching rows across all pages
 }
 
 // =====================================================================

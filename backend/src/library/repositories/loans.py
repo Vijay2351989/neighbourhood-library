@@ -347,7 +347,7 @@ async def list_loans(
     return ListLoansResult(rows=rows, total_count=total_count)
 
 
-# ---------- member-scoped query (no pagination per spec) ----------
+# ---------- member-scoped query ----------
 
 
 async def get_member_loans(
@@ -355,34 +355,57 @@ async def get_member_loans(
     *,
     member_id: int,
     filter_value: LoanFilter,
+    limit: int,
+    offset: int,
     now: datetime,
     fines: FineConfig,
-) -> list[LoanRow]:
-    """All loans for one member, ordered most-recent-first.
+) -> ListLoansResult:
+    """One page of loans for one member, ordered most-recent-first.
 
-    The proto returns the full set with no pagination — at neighborhood
-    library scale a single member's loan history is bounded.
+    Returns the same paginated shape as :func:`list_loans` (rows + total
+    count) so the service layer can treat both endpoints uniformly. The
+    member-existence check stays here so callers get :class:`NotFound`
+    for unknown members rather than an empty page that looks identical
+    to "this member has no matching loans".
     """
 
     member = await session.get(Member, member_id)
     if member is None:
         raise NotFound(f"member {member_id} not found")
 
-    stmt = (
+    count_stmt = (
+        select(func.count())
+        .select_from(Loan)
+        .join(BookCopy, BookCopy.id == Loan.copy_id)
+        .where(Loan.member_id == member_id)
+    )
+    count_stmt = _apply_loan_filter(
+        count_stmt, filter_value=filter_value, now=now, fines=fines
+    )
+    total_count = (await session.scalar(count_stmt)) or 0
+
+    list_stmt = (
         select(Loan, BookCopy.book_id, Book.title, Book.author, Member.name)
         .join(BookCopy, BookCopy.id == Loan.copy_id)
         .join(Book, Book.id == BookCopy.book_id)
         .join(Member, Member.id == Loan.member_id)
         .where(Loan.member_id == member_id)
     )
-    stmt = _apply_loan_filter(stmt, filter_value=filter_value, now=now, fines=fines)
-    stmt = stmt.order_by(Loan.borrowed_at.desc(), Loan.id.desc())
+    list_stmt = _apply_loan_filter(
+        list_stmt, filter_value=filter_value, now=now, fines=fines
+    )
+    list_stmt = (
+        list_stmt.order_by(Loan.borrowed_at.desc(), Loan.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
 
-    result = await session.execute(stmt)
-    return [
+    result = await session.execute(list_stmt)
+    rows = [
         LoanRow(loan=loan, book_id=bid, book_title=t, book_author=a, member_name=n)
         for loan, bid, t, a, n in result.all()
     ]
+    return ListLoansResult(rows=rows, total_count=total_count)
 
 
 # ---------- aggregate: outstanding fines for one member ----------

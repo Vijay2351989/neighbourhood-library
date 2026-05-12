@@ -27,6 +27,7 @@ from library.services.conversions import (
     clamp_pagination,
     datetime_to_pb,
     normalize_search,
+    validate_email,
 )
 
 _tracer = trace.get_tracer("library.services.member_service")
@@ -52,11 +53,9 @@ class MemberService:
         self, request: member_pb2.CreateMemberRequest
     ) -> member_pb2.CreateMemberResponse:
         name = request.name.strip()
-        email = request.email.strip()
         if not name:
             raise InvalidArgument("name is required")
-        if not email:
-            raise InvalidArgument("email is required")
+        email = validate_email(request.email)
 
         phone = request.phone.value if request.HasField("phone") else None
         address = request.address.value if request.HasField("address") else None
@@ -88,11 +87,9 @@ class MemberService:
         if request.id <= 0:
             raise InvalidArgument("id is required")
         name = request.name.strip()
-        email = request.email.strip()
         if not name:
             raise InvalidArgument("name is required")
-        if not email:
-            raise InvalidArgument("email is required")
+        email = validate_email(request.email)
 
         phone = request.phone.value if request.HasField("phone") else None
         address = request.address.value if request.HasField("address") else None
